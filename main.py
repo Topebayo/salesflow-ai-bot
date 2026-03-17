@@ -16,8 +16,9 @@ import httpx
 from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi import FastAPI, Request, HTTPException, Query, Form
+from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
 
 from ai_engine import ai_engine
@@ -452,9 +453,55 @@ async def handle_webhook(request: Request) -> JSONResponse:
         
     except Exception as e:
         logger.error(f"❌ Error processing webhook: {str(e)}")
-        # Still return 200 to prevent Meta from retrying
-        # Log the error for debugging but don't expose it
+        # STILL RETURN 200 TO PREVENT META FROM RETRYING
+        # LOG THE ERROR FOR DEBUGGING BUT DON'T EXPOSE IT
         return JSONResponse(content={"status": "ok"}, status_code=200)
+
+@app.post("/twilio/webhook")
+async def handle_twilio_webhook(
+    From: str = Form(...),
+    Body: str = Form(...),
+    ProfileName: str = Form(None)
+) -> PlainTextResponse:
+    """
+    Twilio WhatsApp Webhook Handler Endpoint (POST)
+    This is much simpler than Meta's webhook. Twilio expects an XML response (TwiML)
+    """
+    try:
+        # Twilio phone numbers are formatted like "whatsapp:+1234567890" The `+` is passed encoded so it might just be the string as parsed by Form()
+        # Clean the sender phone number
+        phone_number = From.replace("whatsapp:", "")
+        
+        logger.info(f"📨 Received Twilio message from {phone_number}: {Body[:50]}...")
+        
+        # Save contact name if provided by Twilio
+        if ProfileName:
+            db.update_contact_name(phone_number, ProfileName)
+            
+        # Generate AI response using Gemini
+        ai_response = await ai_engine.generate_response(
+            phone_number=phone_number,
+            user_message=Body
+        )
+        
+        # Build TwiML response
+        resp = MessagingResponse()
+        if ai_response:
+            resp.message(ai_response)
+        else:
+            logger.error("❌ AI engine returned empty response for Twilio")
+            resp.message("Apologies, I'm experiencing technical difficulties.")
+            
+        # Twilio needs XML response
+        return PlainTextResponse(str(resp), media_type="application/xml")
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing Twilio webhook: {str(e)}")
+        # Even on error, return a valid generic TwiML so Twilio doesn't throw errors
+        resp = MessagingResponse()
+        resp.message("Apologies, I'm experiencing technical difficulties.")
+        return PlainTextResponse(str(resp), media_type="application/xml")
+
 
 
 # =============================================================================
