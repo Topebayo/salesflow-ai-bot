@@ -90,10 +90,10 @@ class GeminiAIEngine:
         # Configure the Gemini API
         genai.configure(api_key=self.api_key)
         
-        # Initialize the model with Gemini 2.5 Flash
-        # Using 2.5 Flash for optimal speed and cost-effectiveness
+        # Initialize the model with Gemini 2.0 Flash
+        # Using 2.0 Flash for higher free-tier rate limits
         self.model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
+            model_name="gemini-2.0-flash",
             system_instruction=SALES_AGENT_SYSTEM_PROMPT
         )
         
@@ -165,13 +165,8 @@ class GeminiAIEngine:
         except Exception as e:
             logger.error(f"❌ Error generating AI response: {str(e)}")
             
-            # Return a graceful fallback message
-            return (
-                "I apologize, but I'm experiencing a brief technical hiccup. 🙏\n\n"
-                "Please give me a moment and try again. "
-                "Your inquiry is important to us, and I'll be right back to assist you!\n\n"
-                "If this persists, you can also reach us directly at [your contact info]."
-            )
+            # Return a short, human-like fallback message
+            return "sorry, i'm having a small issue on my end. please send that again"
     
     def clear_conversation(self, phone_number: str) -> bool:
         """
