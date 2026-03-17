@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 
 from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi import FastAPI, Request, HTTPException, Query, Form
+from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
 
@@ -91,6 +92,15 @@ app = FastAPI(
     description="An AI-powered sales agent that automates WhatsApp conversations using Gemini 1.5 Flash",
     version="1.0.0",
     lifespan=lifespan
+)
+
+# Add CORS middleware to allow the dashboard to fetch data
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this in production to match your frontend domain
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
