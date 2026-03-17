@@ -1,17 +1,17 @@
 """
 =============================================================================
-AI ENGINE MODULE - GEMINI 1.5 FLASH INTEGRATION
+AI ENGINE MODULE - GROQ (LLAMA 3) INTEGRATION
 =============================================================================
-This module handles all AI-related functionality using Google's Gemini 1.5 Flash.
-It includes a robust system prompt designed for a high-performing Nigerian
-Sales Closer that drives conversions.
+This module handles all AI-related functionality using Groq's ultra-fast
+inference API with Meta's Llama 3.1 model. It includes a robust system prompt
+designed for a human-like Nigerian drinks vendor on WhatsApp.
 """
 
 import os
 import logging
 from typing import Optional
 from dotenv import load_dotenv
-import google.generativeai as genai
+from groq import Groq
 
 # Load environment variables
 load_dotenv()
@@ -21,20 +21,18 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# SYSTEM PROMPT - NIGERIAN SALES CLOSER PERSONA
+# SYSTEM PROMPT - NIGERIAN DRINKS VENDOR PERSONA
 # =============================================================================
-# This prompt defines the AI's personality, sales methodology, and behavior.
-# It's designed to be persuasive, professional, and culturally relevant.
 
 SALES_AGENT_SYSTEM_PROMPT = """
-You are **Temitope's AI**, a human-like vendor selling premium drinks in Lagos, Nigeria chatting on WhatsApp. 
+You are Temitope's AI, a human-like vendor selling premium drinks in Lagos, Nigeria chatting on WhatsApp. 
 
-## CRITICAL RULES FOR YOUR BEHAVIOR:
-1. **NO "STORY" OR LONG PARAGRAPHS.** Never sound like an AI generating an essay. Your responses MUST be extremely short, casual, and straight to the point, exactly like someone texting on WhatsApp.
-2. **BE HUMAN & RELAXED.** Use casual Nigerian vendor language. Use "sir" or "ma" politely. Do not use asterisks or bold text for emphasis (e.g. no *₦400,000*). Use "k" for thousands (e.g. "400k" instead of "400,000").
-3. **ONLY ONE FOLLOW-UP QUESTION AT A TIME.** Keep the conversation flowing naturally without overwhelming the customer.
+CRITICAL RULES FOR YOUR BEHAVIOR:
+1. NO "STORY" OR LONG PARAGRAPHS. Never sound like an AI generating an essay. Your responses MUST be extremely short, casual, and straight to the point, exactly like someone texting on WhatsApp.
+2. BE HUMAN & RELAXED. Use casual Nigerian vendor language. Use "sir" or "ma" politely. Do not use asterisks or bold text for emphasis. Use "k" for thousands (e.g. "400k" instead of "400,000").
+3. ONLY ONE FOLLOW-UP QUESTION AT A TIME. Keep the conversation flowing naturally without overwhelming the customer.
 
-## EXACT EXAMPLES OF HOW YOU MUST SPEAK:
+EXACT EXAMPLES OF HOW YOU MUST SPEAK:
 
 User: "i need 2 bottles of azul"
 You: "2 bottles of azul is 400k sir. anything else you'd like to get?"
@@ -48,7 +46,7 @@ You: "are you looking at any particular drink? or whats your budget so we can wo
 User: "how much is don julio"
 You: "don julio is 120k. how many bottles do you need?"
 
-## YOUR PRODUCT LIST & PRICING (NEVER INVENT PRICES):
+YOUR PRODUCT LIST & PRICING (NEVER INVENT PRICES):
 - Martell: 50k
 - Hennessy: 70k
 - Azul (Clase Azul): 200k
@@ -58,72 +56,71 @@ You: "don julio is 120k. how many bottles do you need?"
 - Baileys: 15k
 - Jameson: 30k
 - Glenfiddich: 60k
-- Moët: 85k
-- Dom Pérignon: 350k
+- Moet: 85k
+- Dom Perignon: 350k
 
-## STORE POLICIES:
-1. **Payment:** payment validates order. NO pay on delivery.
-2. **Lagos Delivery:** same day delivery.
-3. **Outside Lagos:** 24 to 48 hours delivery.
+STORE POLICIES:
+1. Payment: payment validates order. NO pay on delivery.
+2. Lagos Delivery: same day delivery.
+3. Outside Lagos: 24 to 48 hours delivery.
 
 REMEMBER: Sound like a native Nigerian Whatsapp user. No essays. Keep it very short.
 """
 
 
-class GeminiAIEngine:
+class GroqAIEngine:
     """
-    AI Engine class that handles all interactions with Google's Gemini 2.5 Flash.
+    AI Engine class that handles all interactions with Groq's Llama 3.1 model.
     Maintains conversation context using persistent SQLite storage via database.py.
     Conversations survive server restarts.
     """
     
     def __init__(self):
         """
-        Initialize the Gemini AI Engine with API configuration and database.
+        Initialize the Groq AI Engine with API configuration and database.
         """
-        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.api_key = os.getenv("GROQ_API_KEY")
         
         if not self.api_key:
-            logger.error("GEMINI_API_KEY not found in environment variables!")
-            raise ValueError("GEMINI_API_KEY is required. Please set it in your .env file.")
+            logger.error("GROQ_API_KEY not found in environment variables!")
+            raise ValueError("GROQ_API_KEY is required. Please set it in your .env file.")
         
-        # Configure the Gemini API
-        genai.configure(api_key=self.api_key)
-        
-        # Initialize the model with Gemini 2.0 Flash
-        # Using 2.0 Flash for higher free-tier rate limits
-        self.model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=SALES_AGENT_SYSTEM_PROMPT
-        )
+        # Initialize the Groq client
+        self.client = Groq(api_key=self.api_key)
+        self.model_name = "llama-3.1-8b-instant"
         
         # Import database for persistent storage
         from database import db
         self.db = db
         
-        logger.info("✅ Gemini AI Engine initialized with persistent storage!")
+        logger.info("✅ Groq AI Engine initialized with persistent storage!")
     
-    def _get_or_create_chat(self, phone_number: str):
+    def _build_messages(self, phone_number: str, new_message: str) -> list:
         """
-        Get existing chat history from database or create a new conversation.
+        Build the messages list for the Groq API from conversation history.
+        """
+        messages = [{"role": "system", "content": SALES_AGENT_SYSTEM_PROMPT}]
         
-        Args:
-            phone_number: The user's WhatsApp phone number (unique identifier)
-            
-        Returns:
-            Chat session for the user, loaded with conversation history from database
-        """
-        # Load conversation history from persistent storage
+        # Load conversation history from database
         history = self.db.get_conversation_history(phone_number)
         
-        if not history:
-            logger.info(f"📱 New conversation started for: {phone_number}")
-        else:
+        if history:
             logger.info(f"📂 Loaded {len(history)} messages from history for: {phone_number}")
+            for msg in history:
+                role = msg.get("role", "user")
+                # Groq uses "assistant" instead of "model"
+                if role == "model":
+                    role = "assistant"
+                parts = msg.get("parts", [])
+                text = parts[0] if parts else ""
+                messages.append({"role": role, "content": text})
+        else:
+            logger.info(f"📱 New conversation started for: {phone_number}")
         
-        # Create chat with history from database
-        chat = self.model.start_chat(history=history)
-        return chat
+        # Add the new user message
+        messages.append({"role": "user", "content": new_message})
+        
+        return messages
     
     async def generate_response(
         self,
@@ -133,13 +130,6 @@ class GeminiAIEngine:
         """
         Generate an AI response for a user message.
         Both user message and AI response are persisted to the database.
-        
-        Args:
-            phone_number: The sender's WhatsApp phone number
-            user_message: The message content from the user
-            
-        Returns:
-            AI-generated response string, or None if generation fails
         """
         try:
             logger.info(f"💬 Generating response for {phone_number}: {user_message[:50]}...")
@@ -147,14 +137,19 @@ class GeminiAIEngine:
             # Save the user's message to database
             self.db.save_message(phone_number, "user", user_message)
             
-            # Get or create chat session for this user (loads full history)
-            chat = self._get_or_create_chat(phone_number)
+            # Build messages with history
+            messages = self._build_messages(phone_number, user_message)
             
-            # Generate response using Gemini
-            response = chat.send_message(user_message)
+            # Generate response using Groq
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=300,
+            )
             
             # Extract the response text
-            ai_response = response.text
+            ai_response = response.choices[0].message.content
             
             # Save the AI response to database
             self.db.save_message(phone_number, "model", ai_response)
@@ -169,30 +164,16 @@ class GeminiAIEngine:
             return "sorry, i'm having a small issue on my end. please send that again"
     
     def clear_conversation(self, phone_number: str) -> bool:
-        """
-        Clear the conversation history for a specific user.
-        Removes all messages from the database for this phone number.
-        
-        Args:
-            phone_number: The user's WhatsApp phone number
-            
-        Returns:
-            True if conversation was cleared, False if no conversation existed
-        """
+        """Clear the conversation history for a specific user."""
         return self.db.clear_conversation(phone_number)
     
     def get_conversation_count(self) -> int:
-        """
-        Get the total number of unique conversations in the database.
-        
-        Returns:
-            Number of unique conversations
-        """
+        """Get the total number of unique conversations in the database."""
         return self.db.get_conversation_count()
 
 
 # Create a singleton instance to be imported by other modules
-ai_engine = GeminiAIEngine()
+ai_engine = GroqAIEngine()
 
 
 # =============================================================================
@@ -204,9 +185,9 @@ if __name__ == "__main__":
     async def test_ai_engine():
         """Test the AI engine with sample messages."""
         test_messages = [
-            "Hello, I'm interested in your services",
-            "How much does it cost?",
-            "That sounds good, how do I get started?"
+            "Hello, I'm interested in your drinks",
+            "How much is hennessy?",
+            "give me 2 bottles"
         ]
         
         test_phone = "+2348012345678"
