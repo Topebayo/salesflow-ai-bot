@@ -1,0 +1,2 @@
+200
+{'messaging_product': 'whatsapp', 'contacts': [{'input': '2349155118839', 'wa_id': '2349155118839'}], 'messages': [{'id': 'wamid.HBgNMjM0OTE1NTExODgzORUCABEYEkNEMTBDRjREMTNCRDA3QjhEMAA=', 'message_status': 'accepted'}]}
