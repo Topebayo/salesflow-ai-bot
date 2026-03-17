@@ -12,6 +12,7 @@ Version: 1.0.0
 
 import os
 import logging
+import asyncio
 import httpx
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -36,6 +37,11 @@ load_dotenv()
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+
+# Twilio Configuration
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")  # Sandbox number
 
 # Meta Graph API endpoint for sending messages
 WHATSAPP_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
@@ -474,43 +480,60 @@ async def handle_twilio_webhook(
     ProfileName: str = Form(None)
 ) -> PlainTextResponse:
     """
-    Twilio WhatsApp Webhook Handler Endpoint (POST)
-    This is much simpler than Meta's webhook. Twilio expects an XML response (TwiML)
+    Twilio WhatsApp Webhook Handler.
+    Responds IMMEDIATELY with empty TwiML to avoid Twilio timeouts,
+    then processes the AI response in the background and sends it
+    via the Twilio REST API.
     """
+    # Clean the sender phone number
+    phone_number = From.replace("whatsapp:", "")
+    logger.info(f"📨 Received Twilio message from {phone_number}: {Body[:50]}...")
+
+    # Save contact name if provided
+    if ProfileName:
+        db.update_contact_name(phone_number, ProfileName)
+
+    # Launch background task to generate AI response and send via Twilio REST API
+    asyncio.create_task(_process_and_reply_twilio(phone_number, Body))
+
+    # Respond INSTANTLY with empty TwiML so Twilio doesn't time out
+    resp = MessagingResponse()
+    return PlainTextResponse(str(resp), media_type="application/xml")
+
+
+async def _process_and_reply_twilio(phone_number: str, user_message: str):
+    """Background task: generate AI response then send it via Twilio REST API."""
     try:
-        # Twilio phone numbers are formatted like "whatsapp:+1234567890" The `+` is passed encoded so it might just be the string as parsed by Form()
-        # Clean the sender phone number
-        phone_number = From.replace("whatsapp:", "")
-        
-        logger.info(f"📨 Received Twilio message from {phone_number}: {Body[:50]}...")
-        
-        # Save contact name if provided by Twilio
-        if ProfileName:
-            db.update_contact_name(phone_number, ProfileName)
-            
-        # Generate AI response using Gemini
+        # Generate AI response
         ai_response = await ai_engine.generate_response(
             phone_number=phone_number,
-            user_message=Body
+            user_message=user_message
         )
-        
-        # Build TwiML response
-        resp = MessagingResponse()
-        if ai_response:
-            resp.message(ai_response)
-        else:
-            logger.error("❌ AI engine returned empty response for Twilio")
-            resp.message("Apologies, I'm experiencing technical difficulties.")
-            
-        # Twilio needs XML response
-        return PlainTextResponse(str(resp), media_type="application/xml")
-        
+
+        if not ai_response:
+            ai_response = "sorry, something went wrong on my end. please try again"
+
+        # Send the response via Twilio REST API
+        twilio_api_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                twilio_api_url,
+                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                data={
+                    "From": TWILIO_WHATSAPP_NUMBER,
+                    "To": f"whatsapp:{phone_number}",
+                    "Body": ai_response
+                }
+            )
+
+            if response.status_code == 201:
+                logger.info(f"✅ Twilio reply sent to {phone_number}")
+            else:
+                logger.error(f"❌ Twilio send failed: {response.status_code} {response.text}")
+
     except Exception as e:
-        logger.error(f"❌ Error processing Twilio webhook: {str(e)}")
-        # Even on error, return a valid generic TwiML so Twilio doesn't throw errors
-        resp = MessagingResponse()
-        resp.message("Apologies, I'm experiencing technical difficulties.")
-        return PlainTextResponse(str(resp), media_type="application/xml")
+        logger.error(f"❌ Background Twilio reply error: {str(e)}")
 
 
 
