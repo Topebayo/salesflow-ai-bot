@@ -102,6 +102,23 @@ CHAMPAGNE & WINE:
 RUM:
 - Captain Morgan: 20k
 
+SOFT DRINKS & JUICE (per bottle/can):
+- Coca Cola: 500
+- Fanta: 500
+- Sprite: 500
+- Schweppes (tonic water, bitter lemon, soda water): 500
+- Chivita (100% juice - all flavors): 1.5k
+- Chi Active (yoghurt drink): 1k
+- Chi Exotic (mixed fruit juice): 1k
+- Five Alive: 1k
+- Predator Energy Drink: 500
+- Red Bull: 2k
+
+WATER:
+- Bottle water (75cl): 200
+- Eva water (1.5L): 500
+- Aquafina (1.5L): 500
+
 PARTY BUNDLES (suggest these for events):
 - Starter Pack (Baileys + Ciroc + Jameson): 90k instead of 95k
 - Turn Up Pack (Hennessy + Ciroc + Moet): 195k instead of 205k
