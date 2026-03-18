@@ -595,6 +595,46 @@ async def get_contacts():
     }
 
 
+@app.get("/chats")
+async def get_chats(phone: str = None):
+    """
+    Get full chat messages. 
+    If ?phone=+234... is provided, returns messages for that specific contact.
+    Otherwise returns a summary of all conversations.
+    """
+    if phone:
+        history = db.get_conversation_history(phone, limit=100)
+        return {
+            "phone_number": phone,
+            "messages": [
+                {"role": h["role"], "content": h["parts"][0]} for h in history
+            ]
+        }
+    
+    # Return all contacts with their last few messages
+    contacts = db.get_all_contacts()
+    chats = []
+    for contact in contacts:
+        history = db.get_conversation_history(contact["phone_number"], limit=100)
+        chats.append({
+            "phone_number": contact["phone_number"],
+            "name": contact.get("name", "Unknown"),
+            "message_count": contact["message_count"],
+            "last_seen": contact["last_seen"],
+            "messages": [
+                {"role": h["role"], "content": h["parts"][0]} for h in history
+            ]
+        })
+    return {"chats": chats}
+
+
+@app.delete("/chats/{phone}/clear")
+async def clear_chat(phone: str):
+    """Clear conversation history for a specific phone number."""
+    cleared = db.clear_conversation(phone)
+    return {"cleared": cleared, "phone_number": phone}
+
+
 # =============================================================================
 # APPLICATION ENTRY POINT
 # =============================================================================
