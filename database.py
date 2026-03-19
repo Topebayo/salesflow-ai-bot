@@ -76,6 +76,26 @@ class Database:
                 )
             """)
 
+            # Add human_handoff column if it doesn't exist
+            try:
+                conn.execute("ALTER TABLE contacts ADD COLUMN human_handoff INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            # Orders table — tracks confirmed orders
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    phone_number TEXT NOT NULL,
+                    customer_name TEXT,
+                    items TEXT NOT NULL,
+                    total_amount INTEGER DEFAULT 0,
+                    delivery_address TEXT,
+                    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'dispatched', 'delivered', 'cancelled')),
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Index for fast conversation lookups by phone number
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_conversations_phone
@@ -239,13 +259,7 @@ class Database:
     # =========================================================================
 
     def get_stats(self) -> dict:
-        """
-        Get comprehensive database statistics for analytics.
-
-        Returns:
-            Dict with total_contacts, total_messages, messages_today,
-            conversations_today, and top_contacts
-        """
+        """Get comprehensive database statistics for analytics."""
         with self._get_connection() as conn:
             total_contacts = conn.execute(
                 "SELECT COUNT(*) FROM contacts"
@@ -279,10 +293,88 @@ class Database:
                 "top_contacts": [dict(c) for c in top_contacts]
             }
 
+    # =========================================================================
+    # ORDER OPERATIONS
+    # =========================================================================
+
+    def save_order(self, phone_number: str, customer_name: str, items: str, total_amount: int, delivery_address: str = None) -> int:
+        """Save a new order and return its ID."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """INSERT INTO orders (phone_number, customer_name, items, total_amount, delivery_address)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (phone_number, customer_name, items, total_amount, delivery_address)
+            )
+            conn.commit()
+            order_id = cursor.lastrowid
+            logger.info(f"📦 Order #{order_id} saved for {phone_number}: {items} = {total_amount}")
+            return order_id
+
+    def get_all_orders(self) -> list:
+        """Get all orders, most recent first."""
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM orders ORDER BY created_at DESC")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def update_order_status(self, order_id: int, status: str) -> bool:
+        """Update an order's status."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "UPDATE orders SET status = ? WHERE id = ?", (status, order_id)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_revenue_stats(self) -> dict:
+        """Get revenue and order statistics."""
+        with self._get_connection() as conn:
+            total_orders = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+            total_revenue = conn.execute("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status != 'cancelled'").fetchone()[0]
+            orders_today = conn.execute("SELECT COUNT(*) FROM orders WHERE DATE(created_at) = DATE('now')").fetchone()[0]
+            revenue_today = conn.execute("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE DATE(created_at) = DATE('now') AND status != 'cancelled'").fetchone()[0]
+            return {
+                "total_orders": total_orders,
+                "total_revenue": total_revenue,
+                "orders_today": orders_today,
+                "revenue_today": revenue_today
+            }
+
+    # =========================================================================
+    # HUMAN HANDOFF OPERATIONS
+    # =========================================================================
+
+    def set_human_handoff(self, phone_number: str, active: bool = True):
+        """Flag a conversation for human takeover."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE contacts SET human_handoff = ? WHERE phone_number = ?",
+                (1 if active else 0, phone_number)
+            )
+            conn.commit()
+            logger.info(f"🙋 Human handoff {'activated' if active else 'deactivated'} for {phone_number}")
+
+    def is_human_handoff(self, phone_number: str) -> bool:
+        """Check if a conversation is flagged for human takeover."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT human_handoff FROM contacts WHERE phone_number = ?",
+                (phone_number,)
+            )
+            row = cursor.fetchone()
+            return bool(row and row[0])
+
+    def get_handoff_contacts(self) -> list:
+        """Get all contacts flagged for human takeover."""
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM contacts WHERE human_handoff = 1 ORDER BY last_seen DESC"
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
 
 # =============================================================================
 # SINGLETON INSTANCE
 # =============================================================================
-# Create a single database instance to be imported by other modules.
-
 db = Database()

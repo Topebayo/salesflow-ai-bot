@@ -493,16 +493,51 @@ async def handle_twilio_webhook(
     if ProfileName:
         db.update_contact_name(phone_number, ProfileName)
 
+    # Check if this conversation is in human handoff mode
+    if db.is_human_handoff(phone_number):
+        # Check if owner is resuming the bot
+        if Body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
+            db.set_human_handoff(phone_number, False)
+            await _send_twilio_message(phone_number, "bot is back online! how can i help you?")
+        else:
+            # Don't respond — human is handling this
+            logger.info(f"🙋 Skipping AI response for {phone_number} (human handoff active)")
+        resp = MessagingResponse()
+        return PlainTextResponse(str(resp), media_type="application/xml")
+
+    # Check if customer is asking for a human
+    handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner']
+    if any(trigger in Body.lower() for trigger in handoff_triggers):
+        db.set_human_handoff(phone_number, True)
+        await _send_twilio_message(phone_number, "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏")
+        resp = MessagingResponse()
+        return PlainTextResponse(str(resp), media_type="application/xml")
+
     # Launch background task to generate AI response and send via Twilio REST API
-    asyncio.create_task(_process_and_reply_twilio(phone_number, Body))
+    asyncio.create_task(_process_and_reply_twilio(phone_number, Body, ProfileName))
 
     # Respond INSTANTLY with empty TwiML so Twilio doesn't time out
     resp = MessagingResponse()
     return PlainTextResponse(str(resp), media_type="application/xml")
 
 
-async def _process_and_reply_twilio(phone_number: str, user_message: str):
-    """Background task: generate AI response then send it via Twilio REST API."""
+async def _send_twilio_message(phone_number: str, message: str):
+    """Send a message via Twilio REST API."""
+    twilio_api_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        await client.post(
+            twilio_api_url,
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            data={
+                "From": TWILIO_WHATSAPP_NUMBER,
+                "To": f"whatsapp:{phone_number}",
+                "Body": message
+            }
+        )
+
+
+async def _process_and_reply_twilio(phone_number: str, user_message: str, profile_name: str = None):
+    """Background task: generate AI response, detect orders, then send via Twilio REST API."""
     try:
         # Generate AI response
         ai_response = await ai_engine.generate_response(
@@ -513,24 +548,26 @@ async def _process_and_reply_twilio(phone_number: str, user_message: str):
         if not ai_response:
             ai_response = "sorry, something went wrong on my end. please try again"
 
+        # Detect if AI is sending payment details (order confirmation)
+        if "8137048851" in ai_response or "opay" in ai_response.lower():
+            # Try to extract order info from conversation
+            try:
+                customer_name = profile_name or "Unknown"
+                # Save order with the AI response as items description
+                db.save_order(
+                    phone_number=phone_number,
+                    customer_name=customer_name,
+                    items=user_message,  # Customer's last message usually contains order
+                    total_amount=0,  # Will be updated manually
+                    delivery_address=None
+                )
+                logger.info(f"📦 Order auto-detected for {phone_number}")
+            except Exception as e:
+                logger.error(f"Error saving order: {e}")
+
         # Send the response via Twilio REST API
-        twilio_api_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                twilio_api_url,
-                auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-                data={
-                    "From": TWILIO_WHATSAPP_NUMBER,
-                    "To": f"whatsapp:{phone_number}",
-                    "Body": ai_response
-                }
-            )
-
-            if response.status_code == 201:
-                logger.info(f"✅ Twilio reply sent to {phone_number}")
-            else:
-                logger.error(f"❌ Twilio send failed: {response.status_code} {response.text}")
+        await _send_twilio_message(phone_number, ai_response)
+        logger.info(f"✅ Twilio reply sent to {phone_number}")
 
     except Exception as e:
         logger.error(f"❌ Background Twilio reply error: {str(e)}")
@@ -543,27 +580,18 @@ async def _process_and_reply_twilio(phone_number: str, user_message: str):
 
 @app.get("/")
 async def root():
-    """
-    Root endpoint - Health check and welcome message.
-    """
+    """Root endpoint - Health check and welcome message."""
     return {
         "status": "online",
         "service": "WhatsApp AI Sales Agent",
-        "version": "1.0.0",
-        "message": "🚀 Your AI Sales Agent is running! Configure your webhook URL in Meta Developer Console.",
-        "endpoints": {
-            "webhook": "/webhook (GET for verification, POST for messages)",
-            "health": "/health",
-            "stats": "/stats"
-        }
+        "version": "2.0.0",
+        "message": "🚀 Your AI Sales Agent is running!"
     }
 
 
 @app.get("/health")
 async def health_check():
-    """
-    Health check endpoint for monitoring and load balancers.
-    """
+    """Health check endpoint for monitoring and load balancers."""
     return {
         "status": "healthy",
         "ai_engine": "active",
@@ -573,22 +601,20 @@ async def health_check():
 
 @app.get("/stats")
 async def get_stats():
-    """
-    Get comprehensive application statistics from the database.
-    Includes total contacts, messages, today's activity, and top contacts.
-    """
+    """Get comprehensive application statistics."""
     stats = db.get_stats()
     stats["active_conversations"] = ai_engine.get_conversation_count()
     stats["whatsapp_configured"] = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID)
+    revenue = db.get_revenue_stats()
+    stats.update(revenue)
+    handoffs = db.get_handoff_contacts()
+    stats["pending_handoffs"] = len(handoffs)
     return stats
 
 
 @app.get("/contacts")
 async def get_contacts():
-    """
-    Get all tracked contacts/leads with their message history stats.
-    Useful for lead management and follow-up.
-    """
+    """Get all tracked contacts/leads."""
     return {
         "contacts": db.get_all_contacts(),
         "total": db.get_stats()["total_contacts"]
@@ -597,11 +623,7 @@ async def get_contacts():
 
 @app.get("/chats")
 async def get_chats(phone: str = None):
-    """
-    Get full chat messages. 
-    If ?phone=+234... is provided, returns messages for that specific contact.
-    Otherwise returns a summary of all conversations.
-    """
+    """Get full chat messages."""
     if phone:
         history = db.get_conversation_history(phone, limit=100)
         return {
@@ -610,8 +632,6 @@ async def get_chats(phone: str = None):
                 {"role": h["role"], "content": h["parts"][0]} for h in history
             ]
         }
-    
-    # Return all contacts with their last few messages
     contacts = db.get_all_contacts()
     chats = []
     for contact in contacts:
@@ -633,6 +653,35 @@ async def clear_chat(phone: str):
     """Clear conversation history for a specific phone number."""
     cleared = db.clear_conversation(phone)
     return {"cleared": cleared, "phone_number": phone}
+
+
+@app.get("/orders")
+async def get_orders():
+    """Get all orders with revenue stats."""
+    return {
+        "orders": db.get_all_orders(),
+        "stats": db.get_revenue_stats()
+    }
+
+
+@app.put("/orders/{order_id}/status")
+async def update_order(order_id: int, status: str = Query(...)):
+    """Update order status. Valid: pending, paid, dispatched, delivered, cancelled"""
+    updated = db.update_order_status(order_id, status)
+    return {"updated": updated, "order_id": order_id, "new_status": status}
+
+
+@app.get("/handoffs")
+async def get_handoffs():
+    """Get all conversations waiting for human takeover."""
+    return {"handoffs": db.get_handoff_contacts()}
+
+
+@app.post("/handoffs/{phone}/resume")
+async def resume_bot(phone: str):
+    """Resume AI bot for a conversation after human takeover."""
+    db.set_human_handoff(phone, False)
+    return {"resumed": True, "phone_number": phone}
 
 
 # =============================================================================
