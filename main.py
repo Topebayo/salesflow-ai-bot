@@ -507,7 +507,7 @@ async def handle_twilio_webhook(
         return PlainTextResponse(str(resp), media_type="application/xml")
 
     # Check if customer is asking for a human
-    handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner']
+    handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner', 'human agent']
     if any(trigger in Body.lower() for trigger in handoff_triggers):
         db.set_human_handoff(phone_number, True)
         await _send_twilio_message(phone_number, "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏")
@@ -649,11 +649,17 @@ async def get_chats(phone: str = None):
 
 class BroadcastRequest(BaseModel):
     message: str
+    phones: Optional[list] = None
 
 @app.post("/broadcast")
 async def send_broadcast(request: BroadcastRequest):
-    """Send a promotional/broadcast message to all contacts."""
+    """Send a promotional/broadcast message to all or selected contacts."""
     contacts = db.get_all_contacts()
+    
+    # Filter if specific phones were provided
+    if request.phones is not None and len(request.phones) > 0:
+        contacts = [c for c in contacts if c["phone_number"] in request.phones]
+        
     success_count = 0
     fail_count = 0
     
