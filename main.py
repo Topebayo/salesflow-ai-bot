@@ -3,7 +3,7 @@
 WHATSAPP AI SALES AGENT - MAIN APPLICATION
 =============================================================================
 FastAPI application that handles WhatsApp webhook events and integrates
-with the Gemini AI engine to power automated sales conversations.
+with the Groq AI engine (Llama 3) to power automated sales conversations.
 
 Author: Your Agency Name
 Version: 1.0.0
