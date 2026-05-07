@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 
 from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi import FastAPI, Request, HTTPException, Query, Form
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
@@ -638,14 +639,35 @@ async def get_chats(phone: str = None):
         history = db.get_conversation_history(contact["phone_number"], limit=100)
         chats.append({
             "phone_number": contact["phone_number"],
-            "name": contact.get("name", "Unknown"),
-            "message_count": contact["message_count"],
-            "last_seen": contact["last_seen"],
+            "name": contact.get("name"),
+            "message_count": contact.get("message_count", 0),
             "messages": [
                 {"role": h["role"], "content": h["parts"][0]} for h in history
             ]
         })
     return {"chats": chats}
+
+class BroadcastRequest(BaseModel):
+    message: str
+
+@app.post("/broadcast")
+async def send_broadcast(request: BroadcastRequest):
+    """Send a promotional/broadcast message to all contacts."""
+    contacts = db.get_all_contacts()
+    success_count = 0
+    fail_count = 0
+    
+    for contact in contacts:
+        phone = contact["phone_number"]
+        try:
+            await _send_twilio_message(phone, request.message)
+            success_count += 1
+        except Exception as e:
+            logger.error(f"Failed to broadcast to {phone}: {str(e)}")
+            fail_count += 1
+            
+    return {"status": "success", "sent": success_count, "failed": fail_count}
+
 
 
 @app.delete("/chats/{phone}/clear")
