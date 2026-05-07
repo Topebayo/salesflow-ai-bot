@@ -447,6 +447,12 @@ async def handle_webhook(request: Request) -> JSONResponse:
             )
             
             if ai_response:
+                # Check for AI-triggered handoff
+                if "[HANDOFF_TRIGGERED]" in ai_response:
+                    ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+                    db.set_human_handoff(phone_number, True)
+                    logger.info(f"🙋 AI triggered human handoff for {phone_number}")
+
                 # Send the AI response back to the user
                 success = await send_whatsapp_message(
                     recipient_phone=phone_number,
@@ -548,6 +554,12 @@ async def _process_and_reply_twilio(phone_number: str, user_message: str, profil
 
         if not ai_response:
             ai_response = "sorry, something went wrong on my end. please try again"
+
+        # Check for AI-triggered handoff
+        if "[HANDOFF_TRIGGERED]" in ai_response:
+            ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+            db.set_human_handoff(phone_number, True)
+            logger.info(f"🙋 AI triggered human handoff for {phone_number}")
 
         # Detect if AI is sending payment details (order confirmation)
         if "8137048851" in ai_response or "opay" in ai_response.lower():
