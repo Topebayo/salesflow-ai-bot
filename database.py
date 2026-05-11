@@ -347,6 +347,9 @@ class Database:
     def set_human_handoff(self, phone_number: str, active: bool = True):
         """Flag a conversation for human takeover."""
         with self._get_connection() as conn:
+            # Ensure contact exists before updating
+            conn.execute("INSERT OR IGNORE INTO contacts (phone_number) VALUES (?)", (phone_number,))
+            
             conn.execute(
                 "UPDATE contacts SET human_handoff = ? WHERE phone_number = ?",
                 (1 if active else 0, phone_number)
