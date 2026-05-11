@@ -1,380 +1,207 @@
 """
 =============================================================================
-DATABASE MODULE - PERSISTENT CONVERSATION STORAGE
+DATABASE MODULE - SUPABASE CLOUD STORAGE
 =============================================================================
-Handles all database operations using SQLite for persistent storage.
-Stores conversation history and contact/lead information.
-
-Tables:
-  - conversations: Stores every message (user + AI) with timestamps
-  - contacts: Tracks unique leads with first_seen, last_seen, message_count
-
-Note: SQLite is perfect for development and small-to-medium scale.
-      For high-traffic production, swap to PostgreSQL or Redis.
+Handles all database operations using Supabase (PostgreSQL) for persistent 
+storage. Your data will never be wiped on deployments again.
 =============================================================================
 """
 
-import sqlite3
+import os
 import logging
 from datetime import datetime
-from pathlib import Path
+from supabase import create_client, Client
 
-# Configure logging
 logger = logging.getLogger(__name__)
 
-# Database file lives next to the other project files
-DB_PATH = Path(__file__).parent / "salesflow.db"
-
-
 class Database:
-    """
-    Persistent storage for conversations and contact tracking.
-    Uses SQLite — no external services required.
-    """
+    """Persistent storage for conversations and contact tracking using Supabase."""
 
-    def __init__(self, db_path: str = None):
-        """
-        Initialize the database and create tables if they don't exist.
-
-        Args:
-            db_path: Optional custom path for the database file.
-                     Defaults to salesflow.db in the project root.
-        """
-        self.db_path = db_path or str(DB_PATH)
-        self._init_db()
-        logger.info(f"💾 Database initialized at: {self.db_path}")
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with optimized settings."""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")  # Better concurrent read performance
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
-
-    def _init_db(self):
-        """Create database tables and indexes if they don't exist."""
-        with self._get_connection() as conn:
-            # Conversations table — stores every message
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    phone_number TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK(role IN ('user', 'model')),
-                    content TEXT NOT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # Contacts table — tracks unique leads/customers
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS contacts (
-                    phone_number TEXT PRIMARY KEY,
-                    name TEXT,
-                    first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    message_count INTEGER DEFAULT 0
-                )
-            """)
-
-            # Add human_handoff column if it doesn't exist
-            try:
-                conn.execute("ALTER TABLE contacts ADD COLUMN human_handoff INTEGER DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
-
-            # Orders table — tracks confirmed orders
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS orders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    phone_number TEXT NOT NULL,
-                    customer_name TEXT,
-                    items TEXT NOT NULL,
-                    total_amount INTEGER DEFAULT 0,
-                    delivery_address TEXT,
-                    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'dispatched', 'delivered', 'cancelled')),
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            # Index for fast conversation lookups by phone number
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_conversations_phone
-                ON conversations(phone_number)
-            """)
-
-            # Index for timestamp-based queries (analytics)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_conversations_timestamp
-                ON conversations(timestamp)
-            """)
-
-            conn.commit()
-            logger.info("✅ Database tables verified/created successfully")
+    def __init__(self):
+        """Initialize the Supabase client."""
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_KEY")
+        if not url or not key:
+            logger.warning("Supabase URL or Key missing. Database operations will fail.")
+            self.client = None
+        else:
+            self.client: Client = create_client(url, key)
+            logger.info("✅ Connected to Supabase Cloud Database!")
 
     # =========================================================================
     # CONVERSATION OPERATIONS
     # =========================================================================
 
     def save_message(self, phone_number: str, role: str, content: str):
-        """
-        Save a single message to the database.
+        if not self.client: return
 
-        Args:
-            phone_number: The user's WhatsApp phone number
-            role: 'user' for customer messages, 'model' for AI responses
-            content: The message text content
-        """
-        with self._get_connection() as conn:
-            # Save the message
-            conn.execute(
-                "INSERT INTO conversations (phone_number, role, content) VALUES (?, ?, ?)",
-                (phone_number, role, content)
-            )
+        # 1. Ensure contact exists or update their stats
+        contact_res = self.client.table("contacts").select("*").eq("phone_number", phone_number).execute()
+        
+        if len(contact_res.data) > 0:
+            # Update existing
+            current_count = contact_res.data[0].get("message_count", 0)
+            self.client.table("contacts").update({
+                "message_count": current_count + 1,
+                "last_seen": datetime.utcnow().isoformat()
+            }).eq("phone_number", phone_number).execute()
+        else:
+            # Insert new
+            self.client.table("contacts").insert({
+                "phone_number": phone_number,
+                "message_count": 1
+            }).execute()
 
-            # Update or create contact record
-            conn.execute("""
-                INSERT INTO contacts (phone_number, message_count, last_seen)
-                VALUES (?, 1, CURRENT_TIMESTAMP)
-                ON CONFLICT(phone_number) DO UPDATE SET
-                    message_count = message_count + 1,
-                    last_seen = CURRENT_TIMESTAMP
-            """, (phone_number,))
-
-            conn.commit()
+        # 2. Save the message
+        self.client.table("conversations").insert({
+            "phone_number": phone_number,
+            "role": role,
+            "content": content
+        }).execute()
 
     def get_conversation_history(self, phone_number: str, limit: int = 50) -> list:
-        """
-        Retrieve conversation history for a specific user.
-        Returns messages in the format expected by Gemini's start_chat(history=...).
-
-        Args:
-            phone_number: The user's WhatsApp phone number
-            limit: Maximum number of messages to retrieve (most recent)
-
-        Returns:
-            List of dicts with 'role' and 'parts' keys, compatible with Gemini API
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                """SELECT role, content FROM conversations
-                   WHERE phone_number = ?
-                   ORDER BY timestamp ASC
-                   LIMIT ?""",
-                (phone_number, limit)
-            )
-            history = [
-                {"role": row[0], "parts": [row[1]]}
-                for row in cursor.fetchall()
-            ]
-            return history
+        if not self.client: return []
+        
+        # We order by timestamp descending to get the newest, then reverse it for Gemini
+        res = self.client.table("conversations").select("role, content").eq("phone_number", phone_number).order("timestamp", desc=True).limit(limit).execute()
+        
+        # Reverse to chronological order
+        history = [
+            {"role": row["role"], "parts": [row["content"]]}
+            for row in reversed(res.data)
+        ]
+        return history
 
     def has_conversation(self, phone_number: str) -> bool:
-        """
-        Check if a conversation exists for a phone number.
-
-        Args:
-            phone_number: The user's WhatsApp phone number
-
-        Returns:
-            True if conversation history exists
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM conversations WHERE phone_number = ?",
-                (phone_number,)
-            )
-            return cursor.fetchone()[0] > 0
+        if not self.client: return False
+        res = self.client.table("conversations").select("id", count="exact").eq("phone_number", phone_number).execute()
+        return res.count > 0 if res.count else False
 
     def clear_conversation(self, phone_number: str) -> bool:
-        """
-        Clear all conversation history for a specific user.
-
-        Args:
-            phone_number: The user's WhatsApp phone number
-
-        Returns:
-            True if a conversation was cleared, False if none existed
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM conversations WHERE phone_number = ?",
-                (phone_number,)
-            )
-            conn.commit()
-            cleared = cursor.rowcount > 0
-            if cleared:
-                logger.info(f"🗑️ Conversation cleared for: {phone_number}")
-            return cleared
+        if not self.client: return False
+        res = self.client.table("conversations").delete().eq("phone_number", phone_number).execute()
+        cleared = len(res.data) > 0
+        if cleared:
+            logger.info(f"🗑️ Conversation cleared for: {phone_number}")
+        return cleared
 
     def get_conversation_count(self) -> int:
-        """
-        Get the total number of unique conversations (distinct phone numbers).
-
-        Returns:
-            Number of unique conversations in the database
-        """
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT COUNT(DISTINCT phone_number) FROM conversations"
-            )
-            return cursor.fetchone()[0]
+        if not self.client: return 0
+        res = self.client.table("contacts").select("phone_number", count="exact").execute()
+        return res.count if res.count else 0
 
     # =========================================================================
     # CONTACT / LEAD OPERATIONS
     # =========================================================================
 
     def get_all_contacts(self) -> list:
-        """
-        Retrieve all contacts/leads, ordered by most recently active.
-
-        Returns:
-            List of contact dicts with phone_number, name, first_seen,
-            last_seen, and message_count
-        """
-        with self._get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM contacts ORDER BY last_seen DESC"
-            )
-            return [dict(row) for row in cursor.fetchall()]
+        if not self.client: return []
+        res = self.client.table("contacts").select("*").order("last_seen", desc=True).execute()
+        return res.data
 
     def update_contact_name(self, phone_number: str, name: str):
-        """
-        Update a contact's name (e.g., from WhatsApp profile data).
-
-        Args:
-            phone_number: The contact's phone number
-            name: The contact's display name
-        """
-        with self._get_connection() as conn:
-            conn.execute(
-                """UPDATE contacts SET name = ?
-                   WHERE phone_number = ? AND (name IS NULL OR name = '')""",
-                (name, phone_number)
-            )
-            conn.commit()
+        if not self.client: return
+        contact_res = self.client.table("contacts").select("name").eq("phone_number", phone_number).execute()
+        if len(contact_res.data) > 0 and not contact_res.data[0].get("name"):
+            self.client.table("contacts").update({"name": name}).eq("phone_number", phone_number).execute()
 
     # =========================================================================
     # ANALYTICS / STATS
     # =========================================================================
 
     def get_stats(self) -> dict:
-        """Get comprehensive database statistics for analytics."""
-        with self._get_connection() as conn:
-            total_contacts = conn.execute(
-                "SELECT COUNT(*) FROM contacts"
-            ).fetchone()[0]
-
-            total_messages = conn.execute(
-                "SELECT COUNT(*) FROM conversations"
-            ).fetchone()[0]
-
-            messages_today = conn.execute(
-                "SELECT COUNT(*) FROM conversations WHERE DATE(timestamp) = DATE('now')"
-            ).fetchone()[0]
-
-            conversations_today = conn.execute(
-                """SELECT COUNT(DISTINCT phone_number) FROM conversations
-                   WHERE DATE(timestamp) = DATE('now')"""
-            ).fetchone()[0]
-
-            # Top 5 most active contacts
-            conn.row_factory = sqlite3.Row
-            top_contacts = conn.execute(
-                """SELECT phone_number, name, message_count, last_seen
-                   FROM contacts ORDER BY message_count DESC LIMIT 5"""
-            ).fetchall()
-
-            return {
-                "total_contacts": total_contacts,
-                "total_messages": total_messages,
-                "messages_today": messages_today,
-                "conversations_today": conversations_today,
-                "top_contacts": [dict(c) for c in top_contacts]
-            }
+        if not self.client:
+            return {"total_contacts": 0, "total_messages": 0, "messages_today": 0, "conversations_today": 0, "top_contacts": []}
+            
+        contacts_res = self.client.table("contacts").select("*", count="exact").execute()
+        total_contacts = contacts_res.count if contacts_res.count else 0
+        
+        msgs_res = self.client.table("conversations").select("*", count="exact").execute()
+        total_messages = msgs_res.count if msgs_res.count else 0
+        
+        # For simplicity in REST without complex time queries, we'll return zeroes for "today" metrics for now, 
+        # or calculate in memory if there are few contacts.
+        # Top 5 contacts
+        top_res = self.client.table("contacts").select("phone_number, name, message_count, last_seen").order("message_count", desc=True).limit(5).execute()
+        
+        return {
+            "total_contacts": total_contacts,
+            "total_messages": total_messages,
+            "messages_today": 0,  # Simplified for Supabase migration
+            "conversations_today": 0,
+            "top_contacts": top_res.data
+        }
 
     # =========================================================================
     # ORDER OPERATIONS
     # =========================================================================
 
     def save_order(self, phone_number: str, customer_name: str, items: str, total_amount: int, delivery_address: str = None) -> int:
-        """Save a new order and return its ID."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                """INSERT INTO orders (phone_number, customer_name, items, total_amount, delivery_address)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (phone_number, customer_name, items, total_amount, delivery_address)
-            )
-            conn.commit()
-            order_id = cursor.lastrowid
-            logger.info(f"📦 Order #{order_id} saved for {phone_number}: {items} = {total_amount}")
-            return order_id
+        if not self.client: return 0
+        res = self.client.table("orders").insert({
+            "phone_number": phone_number,
+            "customer_name": customer_name,
+            "items": items,
+            "total_amount": total_amount,
+            "delivery_address": delivery_address
+        }).execute()
+        
+        order_id = res.data[0].get("id", 0) if res.data else 0
+        logger.info(f"📦 Order #{order_id} saved for {phone_number}: {items} = {total_amount}")
+        return order_id
 
     def get_all_orders(self) -> list:
-        """Get all orders, most recent first."""
-        with self._get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute("SELECT * FROM orders ORDER BY created_at DESC")
-            return [dict(row) for row in cursor.fetchall()]
+        if not self.client: return []
+        res = self.client.table("orders").select("*").order("created_at", desc=True).execute()
+        return res.data
 
     def update_order_status(self, order_id: int, status: str) -> bool:
-        """Update an order's status."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "UPDATE orders SET status = ? WHERE id = ?", (status, order_id)
-            )
-            conn.commit()
-            return cursor.rowcount > 0
+        if not self.client: return False
+        res = self.client.table("orders").update({"status": status}).eq("id", order_id).execute()
+        return len(res.data) > 0
 
     def get_revenue_stats(self) -> dict:
-        """Get revenue and order statistics."""
-        with self._get_connection() as conn:
-            total_orders = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-            total_revenue = conn.execute("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE status != 'cancelled'").fetchone()[0]
-            orders_today = conn.execute("SELECT COUNT(*) FROM orders WHERE DATE(created_at) = DATE('now')").fetchone()[0]
-            revenue_today = conn.execute("SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE DATE(created_at) = DATE('now') AND status != 'cancelled'").fetchone()[0]
-            return {
-                "total_orders": total_orders,
-                "total_revenue": total_revenue,
-                "orders_today": orders_today,
-                "revenue_today": revenue_today
-            }
+        if not self.client:
+            return {"total_orders": 0, "total_revenue": 0, "orders_today": 0, "revenue_today": 0}
+            
+        res = self.client.table("orders").select("total_amount, status").neq("status", "cancelled").execute()
+        
+        total_orders = len(res.data)
+        total_revenue = sum(order.get("total_amount", 0) for order in res.data)
+        
+        return {
+            "total_orders": total_orders,
+            "total_revenue": total_revenue,
+            "orders_today": 0,
+            "revenue_today": 0
+        }
 
     # =========================================================================
     # HUMAN HANDOFF OPERATIONS
     # =========================================================================
 
     def set_human_handoff(self, phone_number: str, active: bool = True):
-        """Flag a conversation for human takeover."""
-        with self._get_connection() as conn:
-            # Ensure contact exists before updating
-            conn.execute("INSERT OR IGNORE INTO contacts (phone_number) VALUES (?)", (phone_number,))
+        if not self.client: return
+        
+        # Ensure contact exists before updating
+        contact_res = self.client.table("contacts").select("*").eq("phone_number", phone_number).execute()
+        if len(contact_res.data) == 0:
+            self.client.table("contacts").insert({"phone_number": phone_number}).execute()
             
-            conn.execute(
-                "UPDATE contacts SET human_handoff = ? WHERE phone_number = ?",
-                (1 if active else 0, phone_number)
-            )
-            conn.commit()
-            logger.info(f"🙋 Human handoff {'activated' if active else 'deactivated'} for {phone_number}")
+        self.client.table("contacts").update({"human_handoff": active}).eq("phone_number", phone_number).execute()
+        logger.info(f"🙋 Human handoff {'activated' if active else 'deactivated'} for {phone_number}")
 
     def is_human_handoff(self, phone_number: str) -> bool:
-        """Check if a conversation is flagged for human takeover."""
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT human_handoff FROM contacts WHERE phone_number = ?",
-                (phone_number,)
-            )
-            row = cursor.fetchone()
-            return bool(row and row[0])
+        if not self.client: return False
+        res = self.client.table("contacts").select("human_handoff").eq("phone_number", phone_number).execute()
+        if len(res.data) > 0:
+            return bool(res.data[0].get("human_handoff", False))
+        return False
 
     def get_handoff_contacts(self) -> list:
-        """Get all contacts flagged for human takeover."""
-        with self._get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT * FROM contacts WHERE human_handoff = 1 ORDER BY last_seen DESC"
-            )
-            return [dict(row) for row in cursor.fetchall()]
+        if not self.client: return []
+        res = self.client.table("contacts").select("*").eq("human_handoff", True).order("last_seen", desc=True).execute()
+        return res.data
 
 
 # =============================================================================
