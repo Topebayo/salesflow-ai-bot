@@ -602,6 +602,23 @@ async def root():
     }
 
 
+class SettingsUpdate(BaseModel):
+    bot_mode: str
+    business_name: str
+
+@app.get("/settings")
+async def get_settings():
+    """Get the current bot mode and business settings."""
+    return db.get_settings()
+
+@app.post("/settings")
+async def update_settings(settings: SettingsUpdate):
+    """Update the bot mode and business name."""
+    success = db.update_settings(settings.bot_mode, settings.business_name)
+    if success:
+        return {"status": "success", "message": "Settings updated"}
+    return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to update settings"})
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for monitoring and load balancers."""

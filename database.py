@@ -203,6 +203,24 @@ class Database:
         res = self.client.table("contacts").select("*").eq("human_handoff", True).order("last_seen", desc=True).execute()
         return res.data
 
+    # =========================================================================
+    # SETTINGS / MODE OPERATIONS
+    # =========================================================================
+
+    def get_settings(self) -> dict:
+        if not self.client: return {"bot_mode": "retail", "business_name": "SalesFlow AI"}
+        res = self.client.table("settings").select("*").eq("id", 1).execute()
+        if len(res.data) > 0:
+            return res.data[0]
+        return {"bot_mode": "retail", "business_name": "SalesFlow AI"}
+
+    def update_settings(self, bot_mode: str, business_name: str) -> bool:
+        if not self.client: return False
+        res = self.client.table("settings").update({
+            "bot_mode": bot_mode,
+            "business_name": business_name
+        }).eq("id", 1).execute()
+        return len(res.data) > 0
 
 # =============================================================================
 # SINGLETON INSTANCE
