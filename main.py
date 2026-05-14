@@ -546,6 +546,9 @@ async def _send_twilio_message(phone_number: str, message: str):
 async def _process_and_reply_twilio(phone_number: str, user_message: str, profile_name: str = None):
     """Background task: generate AI response, detect orders, then send via Twilio REST API."""
     try:
+        # Simulate human typing delay (7 seconds)
+        await asyncio.sleep(7)
+
         # Generate AI response
         ai_response = await ai_engine.generate_response(
             phone_number=phone_number,
