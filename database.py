@@ -29,14 +29,37 @@ class Database:
             logger.info("✅ Connected to Supabase Cloud Database!")
 
     # =========================================================================
+    # BUSINESS LOOKUP
+    # =========================================================================
+    def get_business_id_by_phone(self, whatsapp_number: str) -> str:
+        if not self.client: return None
+        try:
+            # Clean number just in case
+            clean_number = whatsapp_number.replace("+", "")
+            
+            # Try to find exactly matching business
+            res = self.client.table("businesses").select("id").eq("whatsapp_number", clean_number).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]["id"]
+            
+            # Sandbox fallback: If not found, just grab the first business created
+            # This allows testing the first account with the Twilio sandbox
+            res = self.client.table("businesses").select("id").order("created_at", desc=False).limit(1).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]["id"]
+        except Exception as e:
+            logger.error(f"Error looking up business ID: {e}")
+        return None
+
+    # =========================================================================
     # CONVERSATION OPERATIONS
     # =========================================================================
 
-    def save_message(self, phone_number: str, role: str, content: str):
-        if not self.client: return
+    def save_message(self, business_id: str, phone_number: str, role: str, content: str):
+        if not self.client or not business_id: return
 
         # 1. Ensure contact exists or update their stats
-        contact_res = self.client.table("contacts").select("*").eq("phone_number", phone_number).execute()
+        contact_res = self.client.table("contacts").select("*").eq("phone_number", phone_number).eq("business_id", business_id).execute()
         
         if len(contact_res.data) > 0:
             # Update existing
@@ -44,26 +67,28 @@ class Database:
             self.client.table("contacts").update({
                 "message_count": current_count + 1,
                 "last_seen": datetime.utcnow().isoformat()
-            }).eq("phone_number", phone_number).execute()
+            }).eq("phone_number", phone_number).eq("business_id", business_id).execute()
         else:
             # Insert new
             self.client.table("contacts").insert({
+                "business_id": business_id,
                 "phone_number": phone_number,
                 "message_count": 1
             }).execute()
 
         # 2. Save the message
         self.client.table("conversations").insert({
+            "business_id": business_id,
             "phone_number": phone_number,
             "role": role,
             "content": content
         }).execute()
 
-    def get_conversation_history(self, phone_number: str, limit: int = 50) -> list:
-        if not self.client: return []
+    def get_conversation_history(self, business_id: str, phone_number: str, limit: int = 50) -> list:
+        if not self.client or not business_id: return []
         
         # We order by timestamp descending to get the newest, then reverse it for Gemini
-        res = self.client.table("conversations").select("role, content").eq("phone_number", phone_number).order("timestamp", desc=True).limit(limit).execute()
+        res = self.client.table("conversations").select("role, content").eq("phone_number", phone_number).eq("business_id", business_id).order("timestamp", desc=True).limit(limit).execute()
         
         # Reverse to chronological order
         history = [
@@ -99,11 +124,11 @@ class Database:
         res = self.client.table("contacts").select("*").order("last_seen", desc=True).execute()
         return res.data
 
-    def update_contact_name(self, phone_number: str, name: str):
-        if not self.client: return
-        contact_res = self.client.table("contacts").select("name").eq("phone_number", phone_number).execute()
+    def update_contact_name(self, business_id: str, phone_number: str, name: str):
+        if not self.client or not business_id: return
+        contact_res = self.client.table("contacts").select("name").eq("phone_number", phone_number).eq("business_id", business_id).execute()
         if len(contact_res.data) > 0 and not contact_res.data[0].get("name"):
-            self.client.table("contacts").update({"name": name}).eq("phone_number", phone_number).execute()
+            self.client.table("contacts").update({"name": name}).eq("phone_number", phone_number).eq("business_id", business_id).execute()
 
     # =========================================================================
     # ANALYTICS / STATS
@@ -136,9 +161,10 @@ class Database:
     # ORDER OPERATIONS
     # =========================================================================
 
-    def save_order(self, phone_number: str, customer_name: str, items: str, total_amount: int, delivery_address: str = None) -> int:
-        if not self.client: return 0
+    def save_order(self, business_id: str, phone_number: str, customer_name: str, items: str, total_amount: int, delivery_address: str = None) -> int:
+        if not self.client or not business_id: return 0
         res = self.client.table("orders").insert({
+            "business_id": business_id,
             "phone_number": phone_number,
             "customer_name": customer_name,
             "items": items,
@@ -180,20 +206,20 @@ class Database:
     # HUMAN HANDOFF OPERATIONS
     # =========================================================================
 
-    def set_human_handoff(self, phone_number: str, active: bool = True):
-        if not self.client: return
+    def set_human_handoff(self, business_id: str, phone_number: str, active: bool = True):
+        if not self.client or not business_id: return
         
         # Ensure contact exists before updating
-        contact_res = self.client.table("contacts").select("*").eq("phone_number", phone_number).execute()
+        contact_res = self.client.table("contacts").select("*").eq("phone_number", phone_number).eq("business_id", business_id).execute()
         if len(contact_res.data) == 0:
-            self.client.table("contacts").insert({"phone_number": phone_number}).execute()
+            self.client.table("contacts").insert({"phone_number": phone_number, "business_id": business_id}).execute()
             
-        self.client.table("contacts").update({"human_handoff": active}).eq("phone_number", phone_number).execute()
+        self.client.table("contacts").update({"human_handoff": active}).eq("phone_number", phone_number).eq("business_id", business_id).execute()
         logger.info(f"🙋 Human handoff {'activated' if active else 'deactivated'} for {phone_number}")
 
-    def is_human_handoff(self, phone_number: str) -> bool:
-        if not self.client: return False
-        res = self.client.table("contacts").select("human_handoff").eq("phone_number", phone_number).execute()
+    def is_human_handoff(self, business_id: str, phone_number: str) -> bool:
+        if not self.client or not business_id: return False
+        res = self.client.table("contacts").select("human_handoff").eq("phone_number", phone_number).eq("business_id", business_id).execute()
         if len(res.data) > 0:
             return bool(res.data[0].get("human_handoff", False))
         return False
@@ -226,16 +252,14 @@ class Database:
     # BUSINESS CONFIG (CUSTOM PROMPT EDITOR)
     # =========================================================================
 
-    def get_business_config(self) -> dict:
-        """Fetch the first business's custom prompt configuration.
-        In multi-tenant mode, this would be scoped by the incoming phone number's business.
-        For now, we fetch the first (and likely only) business."""
-        if not self.client: return {}
+    def get_business_config(self, business_id: str) -> dict:
+        """Fetch the business's custom prompt configuration."""
+        if not self.client or not business_id: return {}
         try:
             res = self.client.table("businesses").select(
                 "name, bot_mode, agent_name, greeting, business_description, "
                 "products_services, payment_info, business_hours, custom_rules, tone"
-            ).limit(1).execute()
+            ).eq("id", business_id).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]
         except Exception as e:

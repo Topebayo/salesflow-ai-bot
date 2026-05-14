@@ -483,6 +483,7 @@ async def handle_webhook(request: Request) -> JSONResponse:
 @app.post("/twilio/webhook")
 async def handle_twilio_webhook(
     From: str = Form(...),
+    To: str = Form(...),
     Body: str = Form(...),
     ProfileName: str = Form(None)
 ) -> PlainTextResponse:
@@ -494,17 +495,25 @@ async def handle_twilio_webhook(
     """
     # Clean the sender phone number
     phone_number = From.replace("whatsapp:", "")
-    logger.info(f"📨 Received Twilio message from {phone_number}: {Body[:50]}...")
+    to_number = To.replace("whatsapp:", "")
+    logger.info(f"📨 Received Twilio message from {phone_number} to {to_number}: {Body[:50]}...")
+
+    # Look up business ID based on the To number
+    business_id = db.get_business_id_by_phone(to_number)
+    if not business_id:
+        logger.warning(f"⚠️ No business found for number {to_number}. Ignored.")
+        resp = MessagingResponse()
+        return PlainTextResponse(str(resp), media_type="application/xml")
 
     # Save contact name if provided
     if ProfileName:
-        db.update_contact_name(phone_number, ProfileName)
+        db.update_contact_name(business_id, phone_number, ProfileName)
 
     # Check if this conversation is in human handoff mode
-    if db.is_human_handoff(phone_number):
+    if db.is_human_handoff(business_id, phone_number):
         # Check if owner is resuming the bot
         if Body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
-            db.set_human_handoff(phone_number, False)
+            db.set_human_handoff(business_id, phone_number, False)
             await _send_twilio_message(phone_number, "bot is back online! how can i help you?")
         else:
             # Don't respond — human is handling this
@@ -515,13 +524,13 @@ async def handle_twilio_webhook(
     # Check if customer is asking for a human
     handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner', 'human agent']
     if any(trigger in Body.lower() for trigger in handoff_triggers):
-        db.set_human_handoff(phone_number, True)
+        db.set_human_handoff(business_id, phone_number, True)
         await _send_twilio_message(phone_number, "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏")
         resp = MessagingResponse()
         return PlainTextResponse(str(resp), media_type="application/xml")
 
     # Launch background task to generate AI response and send via Twilio REST API
-    asyncio.create_task(_process_and_reply_twilio(phone_number, Body, ProfileName))
+    asyncio.create_task(_process_and_reply_twilio(business_id, phone_number, Body, ProfileName))
 
     # Respond INSTANTLY with empty TwiML so Twilio doesn't time out
     resp = MessagingResponse()
@@ -543,7 +552,7 @@ async def _send_twilio_message(phone_number: str, message: str):
         )
 
 
-async def _process_and_reply_twilio(phone_number: str, user_message: str, profile_name: str = None):
+async def _process_and_reply_twilio(business_id: str, phone_number: str, user_message: str, profile_name: str = None):
     """Background task: generate AI response, detect orders, then send via Twilio REST API."""
     try:
         # Simulate human typing delay (7 seconds)
@@ -551,6 +560,7 @@ async def _process_and_reply_twilio(phone_number: str, user_message: str, profil
 
         # Generate AI response
         ai_response = await ai_engine.generate_response(
+            business_id=business_id,
             phone_number=phone_number,
             user_message=user_message
         )
@@ -561,7 +571,7 @@ async def _process_and_reply_twilio(phone_number: str, user_message: str, profil
         # Check for AI-triggered handoff
         if "[HANDOFF_TRIGGERED]" in ai_response:
             ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
-            db.set_human_handoff(phone_number, True)
+            db.set_human_handoff(business_id, phone_number, True)
             logger.info(f"🙋 AI triggered human handoff for {phone_number}")
 
         # Detect if AI is sending payment details (order confirmation)
@@ -571,6 +581,7 @@ async def _process_and_reply_twilio(phone_number: str, user_message: str, profil
                 customer_name = profile_name or "Unknown"
                 # Save order with the AI response as items description
                 db.save_order(
+                    business_id=business_id,
                     phone_number=phone_number,
                     customer_name=customer_name,
                     items=user_message,  # Customer's last message usually contains order

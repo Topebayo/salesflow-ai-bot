@@ -357,13 +357,13 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
 """
         return prompt
 
-    def _build_messages(self, phone_number: str, new_message: str) -> list:
+    def _build_messages(self, business_id: str, phone_number: str, new_message: str) -> list:
         """
         Build the messages list for the Groq API from conversation history.
         Uses custom prompt from database if configured, otherwise falls back to hardcoded prompts.
         """
         # First, try to load custom prompt config from the business settings
-        business_config = self.db.get_business_config()
+        business_config = self.db.get_business_config(business_id)
         
         if business_config and business_config.get("products_services"):
             # Business has configured their custom prompt — use it
@@ -379,7 +379,7 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
         messages = [{"role": "system", "content": system_prompt}]
         
         # Load conversation history from database
-        history = self.db.get_conversation_history(phone_number)
+        history = self.db.get_conversation_history(business_id, phone_number)
         
         if history:
             logger.info(f"📂 Loaded {len(history)} messages from history for: {phone_number}")
@@ -401,6 +401,7 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
     
     async def generate_response(
         self,
+        business_id: str,
         phone_number: str,
         user_message: str
     ) -> Optional[str]:
@@ -412,10 +413,10 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
             logger.info(f"💬 Generating response for {phone_number}: {user_message[:50]}...")
             
             # Save the user's message to database
-            self.db.save_message(phone_number, "user", user_message)
+            self.db.save_message(business_id, phone_number, "user", user_message)
             
             # Build messages with history
-            messages = self._build_messages(phone_number, user_message)
+            messages = self._build_messages(business_id, phone_number, user_message)
             
             # Generate response using Groq
             response = self.client.chat.completions.create(
@@ -429,7 +430,7 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
             ai_response = response.choices[0].message.content
             
             # Save the AI response to database
-            self.db.save_message(phone_number, "model", ai_response)
+            self.db.save_message(business_id, phone_number, "model", ai_response)
             
             logger.info(f"✅ Response generated and saved for {phone_number}")
             return ai_response
