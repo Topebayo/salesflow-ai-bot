@@ -280,16 +280,101 @@ class GroqAIEngine:
         
         logger.info("✅ Groq AI Engine initialized with persistent storage!")
     
+    def _build_custom_prompt(self, config: dict) -> str:
+        """
+        Build a dynamic system prompt from the business's custom configuration.
+        This is what powers the Custom Prompt Editor on the dashboard.
+        """
+        agent_name = config.get("agent_name", "AI Assistant")
+        business_name = config.get("name", "our business")
+        tone = config.get("tone", "friendly")
+        greeting = config.get("greeting", "")
+        description = config.get("business_description", "")
+        products = config.get("products_services", "")
+        payment = config.get("payment_info", "")
+        hours = config.get("business_hours", "")
+        rules = config.get("custom_rules", "")
+
+        # Tone mapping
+        tone_instructions = {
+            "friendly": "Use a friendly, casual tone. Be warm and approachable.",
+            "professional": "Use a professional, formal tone. Be polite and business-like.",
+            "nigerian_casual": "Use casual Nigerian English. Say 'sir' or 'ma' naturally. Use lowercase. Sound like a real person texting on WhatsApp.",
+            "gen_z": "Use trendy Gen-Z language. Be fun, use slang naturally, keep it vibey."
+        }
+
+        prompt = f"""You are {agent_name}, a sales assistant for {business_name} chatting with customers on WhatsApp.
+
+TONE: {tone_instructions.get(tone, tone_instructions['friendly'])}
+
+CRITICAL RULES:
+1. Keep responses SHORT. Max 2-3 sentences. No long paragraphs.
+2. NEVER use bullet points, numbered lists, asterisks, or markdown formatting. Just type like a real person on WhatsApp.
+3. ONE question at a time. Don't overwhelm the customer.
+4. Be helpful and guide customers toward a purchase or booking.
+"""
+
+        if greeting:
+            prompt += f"""
+GREETING: When a customer says "hi", "hello", or starts a new conversation, reply with something like: "{greeting}"
+"""
+
+        if description:
+            prompt += f"""
+ABOUT THE BUSINESS: {description}
+"""
+
+        if products:
+            prompt += f"""
+PRODUCTS / SERVICES & PRICES:
+{products}
+
+IMPORTANT: Only recommend products/services from this list. Do NOT make up items or prices that are not listed above.
+"""
+
+        if payment:
+            prompt += f"""
+PAYMENT: When a customer is ready to pay, give them these payment details: {payment}
+"""
+
+        if hours:
+            prompt += f"""
+BUSINESS HOURS: {hours}
+"""
+
+        if rules:
+            prompt += f"""
+SPECIAL RULES:
+{rules}
+"""
+
+        prompt += """
+HANDOFF PROTOCOL:
+If a customer explicitly asks to speak to a human, customer service, the owner, or wants to schedule a viewing/meeting, end your reply with: [HANDOFF_TRIGGERED]
+Do NOT write the token visibly. Just append it at the very end of your message.
+
+REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natural.
+"""
+        return prompt
+
     def _build_messages(self, phone_number: str, new_message: str) -> list:
         """
         Build the messages list for the Groq API from conversation history.
-        Selects the correct system prompt based on the database settings.
+        Uses custom prompt from database if configured, otherwise falls back to hardcoded prompts.
         """
-        # Fetch current mode from settings
-        settings = self.db.get_settings()
-        mode = settings.get("bot_mode", "retail")
+        # First, try to load custom prompt config from the business settings
+        business_config = self.db.get_business_config()
         
-        system_prompt = REAL_ESTATE_SYSTEM_PROMPT if mode == "real_estate" else RETAIL_SYSTEM_PROMPT
+        if business_config and business_config.get("products_services"):
+            # Business has configured their custom prompt — use it
+            system_prompt = self._build_custom_prompt(business_config)
+            logger.info(f"🎨 Using custom prompt for business: {business_config.get('name', 'Unknown')}")
+        else:
+            # Fallback to hardcoded prompts (legacy mode)
+            settings = self.db.get_settings()
+            mode = settings.get("bot_mode", "retail")
+            system_prompt = REAL_ESTATE_SYSTEM_PROMPT if mode == "real_estate" else RETAIL_SYSTEM_PROMPT
+            logger.info(f"📋 Using hardcoded {mode} prompt (no custom config found)")
         
         messages = [{"role": "system", "content": system_prompt}]
         

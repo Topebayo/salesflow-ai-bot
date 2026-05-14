@@ -222,6 +222,26 @@ class Database:
         }).eq("id", 1).execute()
         return len(res.data) > 0
 
+    # =========================================================================
+    # BUSINESS CONFIG (CUSTOM PROMPT EDITOR)
+    # =========================================================================
+
+    def get_business_config(self) -> dict:
+        """Fetch the first business's custom prompt configuration.
+        In multi-tenant mode, this would be scoped by the incoming phone number's business.
+        For now, we fetch the first (and likely only) business."""
+        if not self.client: return {}
+        try:
+            res = self.client.table("businesses").select(
+                "name, bot_mode, agent_name, greeting, business_description, "
+                "products_services, payment_info, business_hours, custom_rules, tone"
+            ).limit(1).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+        except Exception as e:
+            logger.error(f"Error fetching business config: {e}")
+        return {}
+
 # =============================================================================
 # SINGLETON INSTANCE
 # =============================================================================
