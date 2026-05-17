@@ -101,12 +101,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware to allow the dashboard to fetch data
+# Add CORS middleware to allow the dashboard to fetch data securely
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this in production to match your frontend domain
+    allow_origins=[
+        "https://topebayo.github.io",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -163,7 +167,7 @@ def extract_message_data(body: dict) -> Optional[tuple[str, str, str]]:
         body: The full webhook payload from WhatsApp
         
     Returns:
-        Tuple of (phone_number, message_body, message_id) or None if not a valid message
+        Tuple of (phone_number, message_body, message_id, to_number) or None if not a valid message
     """
     try:
         # Navigate through the nested JSON structure
@@ -215,8 +219,13 @@ def extract_message_data(body: dict) -> Optional[tuple[str, str, str]]:
             message_body = f"[{message_type.upper()} message received]"
             logger.info(f"Received non-text message type: {message_type}")
         
+        # Extract the business receiving the message
+        to_number = value.get("metadata", {}).get("display_phone_number")
+        if to_number:
+            to_number = to_number.replace("+", "")
+        
         if phone_number and message_body:
-            return (phone_number, message_body, message_id)
+            return (phone_number, message_body, message_id, to_number)
         
         return None
         
@@ -423,9 +432,15 @@ async def handle_webhook(request: Request) -> JSONResponse:
         message_data = extract_message_data(body)
         
         if message_data:
-            phone_number, message_body, message_id = message_data
+            phone_number, message_body, message_id, to_number = message_data
             
-            logger.info(f"📱 Message from {phone_number}: {message_body[:50]}...")
+            logger.info(f"📱 Message from {phone_number} to {to_number}: {message_body[:50]}...")
+            
+            # Look up the business ID based on the Meta WhatsApp number
+            business_id = db.get_business_id_by_phone(to_number)
+            if not business_id:
+                logger.warning(f"⚠️ No business found for number {to_number}. Ignored.")
+                return JSONResponse(content={"status": "ok"}, status_code=200)
             
             # Try to extract and save the sender's name from the payload
             try:
@@ -433,15 +448,32 @@ async def handle_webhook(request: Request) -> JSONResponse:
                 if contacts:
                     sender_name = contacts[0].get("profile", {}).get("name", "")
                     if sender_name:
-                        db.update_contact_name(phone_number, sender_name)
+                        db.update_contact_name(business_id, phone_number, sender_name)
             except (KeyError, IndexError):
                 pass
             
             # Mark the message as read (optional but improves UX)
             await mark_message_as_read(message_id)
             
-            # Generate AI response using Gemini
+            # Check if this conversation is in human handoff mode
+            if db.is_human_handoff(business_id, phone_number):
+                if message_body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
+                    db.set_human_handoff(business_id, phone_number, False)
+                    await send_whatsapp_message(phone_number, "bot is back online! how can i help you?")
+                else:
+                    logger.info(f"🙋 Skipping AI response for {phone_number} (human handoff active)")
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
+            # Check if customer is asking for a human
+            handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner', 'human agent']
+            if any(trigger in message_body.lower() for trigger in handoff_triggers):
+                db.set_human_handoff(business_id, phone_number, True)
+                await send_whatsapp_message(phone_number, "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏")
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+            
+            # Generate AI response using AI Engine (Multi-Tenant)
             ai_response = await ai_engine.generate_response(
+                business_id=business_id,
                 phone_number=phone_number,
                 user_message=message_body
             )
@@ -450,8 +482,24 @@ async def handle_webhook(request: Request) -> JSONResponse:
                 # Check for AI-triggered handoff
                 if "[HANDOFF_TRIGGERED]" in ai_response:
                     ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
-                    db.set_human_handoff(phone_number, True)
+                    db.set_human_handoff(business_id, phone_number, True)
                     logger.info(f"🙋 AI triggered human handoff for {phone_number}")
+
+                # Detect if AI is sending payment details (order confirmation)
+                if "8137048851" in ai_response or "opay" in ai_response.lower():
+                    try:
+                        customer_name = sender_name if 'sender_name' in locals() and sender_name else "Unknown"
+                        db.save_order(
+                            business_id=business_id,
+                            phone_number=phone_number,
+                            customer_name=customer_name,
+                            items=message_body,
+                            total_amount=0,
+                            delivery_address=None
+                        )
+                        logger.info(f"📦 Order auto-detected for {phone_number}")
+                    except Exception as e:
+                        logger.error(f"Error saving order: {e}")
 
                 # Send the AI response back to the user
                 success = await send_whatsapp_message(
