@@ -471,48 +471,9 @@ async def handle_webhook(request: Request) -> JSONResponse:
                 await send_whatsapp_message(phone_number, "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏")
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
-            # Generate AI response using AI Engine (Multi-Tenant)
-            ai_response = await ai_engine.generate_response(
-                business_id=business_id,
-                phone_number=phone_number,
-                user_message=message_body
-            )
-            
-            if ai_response:
-                # Check for AI-triggered handoff
-                if "[HANDOFF_TRIGGERED]" in ai_response:
-                    ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
-                    db.set_human_handoff(business_id, phone_number, True)
-                    logger.info(f"🙋 AI triggered human handoff for {phone_number}")
-
-                # Detect if AI is sending payment details (order confirmation)
-                if "8137048851" in ai_response or "opay" in ai_response.lower():
-                    try:
-                        customer_name = sender_name if 'sender_name' in locals() and sender_name else "Unknown"
-                        db.save_order(
-                            business_id=business_id,
-                            phone_number=phone_number,
-                            customer_name=customer_name,
-                            items=message_body,
-                            total_amount=0,
-                            delivery_address=None
-                        )
-                        logger.info(f"📦 Order auto-detected for {phone_number}")
-                    except Exception as e:
-                        logger.error(f"Error saving order: {e}")
-
-                # Send the AI response back to the user
-                success = await send_whatsapp_message(
-                    recipient_phone=phone_number,
-                    message_text=ai_response
-                )
-                
-                if success:
-                    logger.info(f"✅ Response sent to {phone_number}")
-                else:
-                    logger.error(f"❌ Failed to send response to {phone_number}")
-            else:
-                logger.error("❌ AI engine returned empty response")
+            # Launch background task to generate AI response and send via Meta API
+            # This allows us to return 200 OK instantly so Meta doesn't time out
+            asyncio.create_task(_process_and_reply_meta(business_id, phone_number, message_body, sender_name))
         
         else:
             # This might be a status update or other event type
@@ -527,6 +488,61 @@ async def handle_webhook(request: Request) -> JSONResponse:
         # STILL RETURN 200 TO PREVENT META FROM RETRYING
         # LOG THE ERROR FOR DEBUGGING BUT DON'T EXPOSE IT
         return JSONResponse(content={"status": "ok"}, status_code=200)
+
+async def _process_and_reply_meta(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
+    """Background task: generate AI response, detect orders, then send via Meta Graph API."""
+    try:
+        # Simulate human typing delay (7 seconds) so it doesn't look like a bot
+        await asyncio.sleep(7)
+        
+        # Generate AI response using AI Engine (Multi-Tenant)
+        ai_response = await ai_engine.generate_response(
+            business_id=business_id,
+            phone_number=phone_number,
+            user_message=message_body
+        )
+        
+        if ai_response:
+            # Check for AI-triggered handoff
+            if "[HANDOFF_TRIGGERED]" in ai_response:
+                ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+                db.set_human_handoff(business_id, phone_number, True)
+                logger.info(f"🙋 AI triggered human handoff for {phone_number}")
+
+            # Detect if AI is sending payment details (order confirmation)
+            if "8137048851" in ai_response or "opay" in ai_response.lower():
+                try:
+                    customer_name = sender_name if sender_name else "Unknown"
+                    db.save_order(
+                        business_id=business_id,
+                        phone_number=phone_number,
+                        customer_name=customer_name,
+                        items=message_body,
+                        total_amount=0,
+                        delivery_address=None
+                    )
+                    logger.info(f"📦 Order auto-detected for {phone_number}")
+                except Exception as e:
+                    logger.error(f"Error saving order: {e}")
+
+            # Send the AI response back to the user
+            success = await send_whatsapp_message(
+                recipient_phone=phone_number,
+                message_text=ai_response
+            )
+            
+            if success:
+                logger.info(f"✅ Response sent to {phone_number}")
+            else:
+                logger.error(f"❌ Failed to send response to {phone_number}")
+        else:
+            logger.error("❌ AI engine returned empty response")
+            
+    except Exception as e:
+        logger.error(f"❌ Background Meta reply error: {str(e)}")
+
+# Temporary memory for sandbox routing (Maps customer phone -> business_id)
+SANDBOX_SESSIONS = {}
 
 @app.post("/twilio/webhook")
 async def handle_twilio_webhook(
@@ -546,8 +562,33 @@ async def handle_twilio_webhook(
     to_number = To.replace("whatsapp:", "")
     logger.info(f"📨 Received Twilio message from {phone_number} to {to_number}: {Body[:50]}...")
 
-    # Look up business ID based on the To number
-    business_id = db.get_business_id_by_phone(to_number)
+    # --- SANDBOX MULTI-TENANT SWITCHER ---
+    # Because Twilio Sandbox shares one number, we allow developers to switch the active business via a command
+    if Body.strip().lower().startswith("/test"):
+        target_name = Body.strip()[5:].strip()
+        try:
+            # Search for the business by name
+            res = db.client.table("businesses").select("id, business_name").ilike("business_name", f"%{target_name}%").execute()
+            if res.data and len(res.data) > 0:
+                SANDBOX_SESSIONS[phone_number] = res.data[0]["id"]
+                logger.info(f"🔌 Sandox user {phone_number} connected to {res.data[0]['business_name']}")
+                
+                # Send instant confirmation
+                resp = MessagingResponse()
+                resp.message(f"🔌 Connected to test bot: {res.data[0]['business_name']}. Send 'hi' to start!")
+                return PlainTextResponse(str(resp), media_type="application/xml")
+            else:
+                resp = MessagingResponse()
+                resp.message(f"❌ Could not find a business named '{target_name}'. Please check the exact name in your dashboard.")
+                return PlainTextResponse(str(resp), media_type="application/xml")
+        except Exception as e:
+            logger.error(f"Error switching sandbox: {e}")
+
+    # Look up business ID (Check Sandbox Sessions first, then fallback to database)
+    business_id = SANDBOX_SESSIONS.get(phone_number)
+    if not business_id:
+        business_id = db.get_business_id_by_phone(to_number)
+        
     if not business_id:
         logger.warning(f"⚠️ No business found for number {to_number}. Ignored.")
         resp = MessagingResponse()
