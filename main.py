@@ -569,14 +569,14 @@ async def handle_twilio_webhook(
         target_name = Body.strip()[5:].strip()
         try:
             # Search for the business by name
-            res = db.client.table("businesses").select("id, business_name").ilike("business_name", f"%{target_name}%").execute()
+            res = db.client.table("businesses").select("id, name").ilike("name", f"%{target_name}%").execute()
             if res.data and len(res.data) > 0:
                 SANDBOX_SESSIONS[phone_number] = res.data[0]["id"]
-                logger.info(f"🔌 Sandox user {phone_number} connected to {res.data[0]['business_name']}")
+                logger.info(f"🔌 Sandox user {phone_number} connected to {res.data[0]['name']}")
                 
                 # Send instant confirmation
                 resp = MessagingResponse()
-                resp.message(f"🔌 Connected to test bot: {res.data[0]['business_name']}. Send 'hi' to start!")
+                resp.message(f"🔌 Connected to test bot: {res.data[0]['name']}. Send 'hi' to start!")
                 return PlainTextResponse(str(resp), media_type="application/xml")
             else:
                 resp = MessagingResponse()
