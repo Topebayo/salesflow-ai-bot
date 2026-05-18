@@ -564,6 +564,7 @@ async def handle_twilio_webhook(
 
     # --- SANDBOX MULTI-TENANT SWITCHER ---
     # Because Twilio Sandbox shares one number, we allow developers to switch the active business via a command
+    logger.info("Checking for Sandbox Switcher command...")
     if Body.strip().lower().startswith("/test"):
         target_name = Body.strip()[5:].strip()
         try:
