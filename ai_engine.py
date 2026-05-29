@@ -280,7 +280,7 @@ class GroqAIEngine:
         
         logger.info("✅ Groq AI Engine initialized with persistent storage!")
     
-    def _build_custom_prompt(self, config: dict) -> str:
+    def _build_custom_prompt(self, config: dict, business_id: str = None) -> str:
         """
         Build a dynamic system prompt from the business's custom configuration.
         This is what powers the Custom Prompt Editor on the dashboard.
@@ -324,7 +324,34 @@ GREETING: When a customer says "hi", "hello", or starts a new conversation, repl
 ABOUT THE BUSINESS: {description}
 """
 
-        if products:
+        # Fetch products from database if business_id is provided
+        db_products = []
+        if business_id:
+            db_products = self.db.get_available_products(business_id)
+
+        if db_products:
+            # Build structured products prompt
+            product_list_str = ""
+            for p in db_products:
+                try:
+                    price_val = float(p.get('price')) if p.get('price') else 0
+                    price_str = f" ₦{price_val:,.0f}" if price_val > 0 else " Price on request"
+                except Exception:
+                    price_str = f" ₦{p.get('price')}"
+                category_str = f" [{p['category']}]" if p.get('category') else ""
+                desc_str = f" - {p['description']}" if p.get('description') else ""
+                product_list_str += f"- ID: {p['id']} | {p['name']}{price_str}{category_str}{desc_str}\n"
+
+            prompt += f"""
+VISUAL PRODUCT CATALOG WITH IMAGES:
+{product_list_str}
+IMPORTANT INSTRUCTIONS FOR SENDING IMAGES:
+If the customer asks to see a photo, image, or preview of any product/property, you MUST append the token [IMAGE:product_id] at the very end of your response, where product_id is the exact ID of the product from the list above.
+Example: "Here is the beautiful Casamigos! [IMAGE:some-uuid-here]"
+You can include multiple image tokens if they ask for multiple products: "Here are the photos! [IMAGE:uuid-1] [IMAGE:uuid-2]"
+Do NOT invent product images or IDs that are not in the list above.
+"""
+        elif products:
             prompt += f"""
 PRODUCTS / SERVICES & PRICES:
 {products}
@@ -365,9 +392,9 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
         # First, try to load custom prompt config from the business settings
         business_config = self.db.get_business_config(business_id)
         
-        if business_config and business_config.get("products_services"):
+        if business_config:
             # Business has configured their custom prompt — use it
-            system_prompt = self._build_custom_prompt(business_config)
+            system_prompt = self._build_custom_prompt(business_config, business_id)
             logger.info(f"🎨 Using custom prompt for business: {business_config.get('name', 'Unknown')}")
         else:
             # Fallback to hardcoded prompts (legacy mode)
@@ -441,13 +468,13 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
             # Return a short, human-like fallback message
             return "sorry, i'm having a small issue on my end. please send that again"
     
-    def clear_conversation(self, phone_number: str) -> bool:
+    def clear_conversation(self, business_id: str, phone_number: str) -> bool:
         """Clear the conversation history for a specific user."""
-        return self.db.clear_conversation(phone_number)
+        return self.db.clear_conversation(business_id, phone_number)
     
-    def get_conversation_count(self) -> int:
+    def get_conversation_count(self, business_id: str = None) -> int:
         """Get the total number of unique conversations in the database."""
-        return self.db.get_conversation_count()
+        return self.db.get_conversation_count(business_id)
 
 
 # Create a singleton instance to be imported by other modules

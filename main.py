@@ -11,6 +11,7 @@ Version: 1.0.0
 """
 
 import os
+import re
 import logging
 import asyncio
 import httpx
@@ -236,51 +237,27 @@ def extract_message_data(body: dict) -> Optional[tuple[str, str, str]]:
 
 async def send_whatsapp_message(
     recipient_phone: str,
-    message_text: str
+    message_text: str,
+    access_token: str = None,
+    phone_number_id: str = None
 ) -> bool:
     """
-    Send a WhatsApp message via the Meta Graph API.
-    
-    This function makes an async HTTP POST request to the WhatsApp Business API
-    to deliver the AI-generated response back to the user.
-    
-    Args:
-        recipient_phone: The recipient's phone number (in international format without +)
-        message_text: The message content to send
-        
-    Returns:
-        True if message was sent successfully, False otherwise
-        
-    WhatsApp Send Message API Request:
-    POST https://graph.facebook.com/v18.0/{phone_number_id}/messages
-    Headers:
-        Authorization: Bearer {access_token}
-        Content-Type: application/json
-    Body:
-        {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": "{recipient_phone}",
-            "type": "text",
-            "text": {
-                "preview_url": false,
-                "body": "{message_text}"
-            }
-        }
+    Send a WhatsApp message via the Meta Graph API using per-business credentials.
     """
+    token = access_token or WHATSAPP_ACCESS_TOKEN
+    num_id = phone_number_id or WHATSAPP_PHONE_NUMBER_ID
     
-    # Validate configuration
-    if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+    if not token or not num_id:
         logger.error("❌ WhatsApp API credentials not configured!")
         return False
+        
+    api_url = f"https://graph.facebook.com/v18.0/{num_id}/messages"
     
-    # Prepare the request headers
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
     
-    # Prepare the message payload
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
@@ -293,15 +270,13 @@ async def send_whatsapp_message(
     }
     
     try:
-        # Send the message using async HTTP client
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                WHATSAPP_API_URL,
+                api_url,
                 headers=headers,
                 json=payload
             )
             
-            # Check response status
             if response.status_code == 200:
                 response_data = response.json()
                 message_id = response_data.get("messages", [{}])[0].get("id", "unknown")
@@ -312,32 +287,84 @@ async def send_whatsapp_message(
                 logger.error(f"Response: {response.text}")
                 return False
                 
-    except httpx.TimeoutException:
-        logger.error("❌ Timeout while sending WhatsApp message")
-        return False
-    except httpx.RequestError as e:
-        logger.error(f"❌ Request error while sending WhatsApp message: {str(e)}")
-        return False
     except Exception as e:
-        logger.error(f"❌ Unexpected error sending WhatsApp message: {str(e)}")
+        logger.error(f"❌ Error sending WhatsApp message: {str(e)}")
         return False
 
 
-async def mark_message_as_read(message_id: str) -> bool:
+async def send_whatsapp_image(
+    recipient_phone: str,
+    image_url: str,
+    caption: str = "",
+    access_token: str = None,
+    phone_number_id: str = None
+) -> bool:
     """
-    Mark a received message as read (shows blue ticks to the sender).
+    Send a WhatsApp image message via the Meta Graph API.
+    """
+    token = access_token or WHATSAPP_ACCESS_TOKEN
+    num_id = phone_number_id or WHATSAPP_PHONE_NUMBER_ID
     
-    Args:
-        message_id: The WhatsApp message ID to mark as read
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+    if not token or not num_id:
+        logger.error("❌ WhatsApp API credentials not configured for image sending!")
         return False
+        
+    api_url = f"https://graph.facebook.com/v18.0/{num_id}/messages"
     
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient_phone,
+        "type": "image",
+        "image": {
+            "link": image_url
+        }
+    }
+    if caption:
+        payload["image"]["caption"] = caption
+        
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                api_url,
+                headers=headers,
+                json=payload
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ Image sent successfully to {recipient_phone}!")
+                return True
+            else:
+                logger.error(f"❌ Failed to send image. Status: {response.status_code}, Response: {response.text}")
+                return False
+    except Exception as e:
+        logger.error(f"❌ Error sending WhatsApp image: {str(e)}")
+        return False
+
+
+async def mark_message_as_read(
+    message_id: str,
+    access_token: str = None,
+    phone_number_id: str = None
+) -> bool:
+    """
+    Mark a received message as read (shows blue ticks to the sender).
+    """
+    token = access_token or WHATSAPP_ACCESS_TOKEN
+    num_id = phone_number_id or WHATSAPP_PHONE_NUMBER_ID
+    
+    if not token or not num_id:
+        return False
+        
+    api_url = f"https://graph.facebook.com/v18.0/{num_id}/messages"
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
     
@@ -350,7 +377,7 @@ async def mark_message_as_read(message_id: str) -> bool:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
-                WHATSAPP_API_URL,
+                api_url,
                 headers=headers,
                 json=payload
             )
@@ -362,87 +389,59 @@ async def mark_message_as_read(message_id: str) -> bool:
 
 # =============================================================================
 # WEBHOOK ENDPOINTS
+# ================================================# =============================================================================
+# WEBHOOK ENDPOINTS
 # =============================================================================
 
-@app.get("/webhook")
-async def verify_webhook(
+@app.get("/webhook/{business_id}")
+async def verify_business_webhook(
+    business_id: str,
     hub_mode: Optional[str] = Query(None, alias="hub.mode"),
     hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
     hub_challenge: Optional[str] = Query(None, alias="hub.challenge")
 ) -> PlainTextResponse:
     """
-    WhatsApp Webhook Verification Endpoint (GET)
-    
-    When you configure a webhook URL in the Meta Developer Console,
-    Meta sends a GET request with verification parameters to confirm
-    your endpoint is valid and owned by you.
-    
-    Verification Request Parameters:
-    - hub.mode: Should be "subscribe"
-    - hub.verify_token: Your custom token (must match WHATSAPP_VERIFY_TOKEN)
-    - hub.challenge: A random string that must be echoed back
-    
-    If verification succeeds:
-    - Return the hub.challenge value as plain text
-    
-    If verification fails:
-    - Return 403 Forbidden
+    Per-business WhatsApp Webhook Verification Endpoint (GET).
+    Looks up credentials in the database to verify the handshake.
     """
-    logger.info("📥 Received webhook verification request")
-    logger.info(f"   Mode: {hub_mode}")
-    logger.info(f"   Token: {hub_verify_token}")
-    logger.info(f"   Challenge: {hub_challenge}")
+    logger.info(f"📥 Received webhook verification request for business: {business_id}")
     
-    # Verify the mode and token
-    if hub_mode == "subscribe" and hub_verify_token == WHATSAPP_VERIFY_TOKEN:
-        logger.info("✅ Webhook verification successful!")
-        # Return the challenge to confirm verification
+    # Fetch business credentials
+    creds = db.get_business_credentials(business_id)
+    expected_token = creds.get("meta_verify_token")
+    
+    # Fallback to global verify token if no business-specific token exists yet
+    if not expected_token:
+        expected_token = WHATSAPP_VERIFY_TOKEN
+        
+    if hub_mode == "subscribe" and hub_verify_token == expected_token:
+        logger.info(f"✅ Webhook verification successful for business: {business_id}!")
+        # Mark as connected in the DB
+        db.mark_webhook_verified(business_id)
         return PlainTextResponse(content=hub_challenge, status_code=200)
     else:
-        logger.warning("❌ Webhook verification failed - token mismatch!")
+        logger.warning(f"❌ Webhook verification failed for business: {business_id} — token mismatch!")
         raise HTTPException(status_code=403, detail="Verification failed")
 
 
-@app.post("/webhook")
-async def handle_webhook(request: Request) -> JSONResponse:
+@app.post("/webhook/{business_id}")
+async def handle_business_webhook(business_id: str, request: Request) -> JSONResponse:
     """
-    WhatsApp Webhook Handler Endpoint (POST)
-    
-    This endpoint receives all incoming WhatsApp events including:
-    - New messages (text, media, location, etc.)
-    - Message status updates (sent, delivered, read)
-    - Button/interactive responses
-    
-    Processing Flow:
-    1. Parse the incoming JSON payload
-    2. Extract the sender's phone number and message content
-    3. Generate an AI response using the Gemini engine
-    4. Send the response back via WhatsApp API
-    5. Return 200 OK to acknowledge receipt (IMPORTANT: Meta expects this quickly)
+    Per-business WhatsApp Webhook Handler Endpoint (POST).
+    Scores and routes incoming WhatsApp events directly for the specific business ID.
     """
     try:
-        # Parse the incoming JSON payload
         body = await request.json()
-        
-        # Log the incoming request (be careful with this in production for privacy)
-        logger.info("📨 Received webhook event")
+        logger.info(f"📨 Received webhook event for business {business_id}")
         logger.debug(f"Payload: {body}")
         
-        # Extract message data from the payload
         message_data = extract_message_data(body)
         
         if message_data:
             phone_number, message_body, message_id, to_number = message_data
+            logger.info(f"📱 Message from {phone_number} (scoped to business {business_id}): {message_body[:50]}...")
             
-            logger.info(f"📱 Message from {phone_number} to {to_number}: {message_body[:50]}...")
-            
-            # Look up the business ID based on the Meta WhatsApp number
-            business_id = db.get_business_id_by_phone(to_number)
-            if not business_id:
-                logger.warning(f"⚠️ No business found for number {to_number}. Ignored.")
-                return JSONResponse(content={"status": "ok"}, status_code=200)
-            
-            # Try to extract and save the sender's name from the payload
+            # Save sender name if present
             try:
                 contacts = body["entry"][0]["changes"][0]["value"].get("contacts", [])
                 if contacts:
@@ -452,48 +451,140 @@ async def handle_webhook(request: Request) -> JSONResponse:
             except (KeyError, IndexError):
                 pass
             
-            # Mark the message as read (optional but improves UX)
-            await mark_message_as_read(message_id)
+            # Mark read using business credentials
+            creds = db.get_business_credentials(business_id)
+            access_token = creds.get("meta_access_token")
+            phone_number_id = creds.get("meta_phone_number_id")
+            await mark_message_as_read(message_id, access_token, phone_number_id)
             
-            # Check if this conversation is in human handoff mode
+            # Check human handoff
             if db.is_human_handoff(business_id, phone_number):
                 if message_body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
                     db.set_human_handoff(business_id, phone_number, False)
-                    await send_whatsapp_message(phone_number, "bot is back online! how can i help you?")
+                    await send_whatsapp_message(
+                        recipient_phone=phone_number,
+                        message_text="bot is back online! how can i help you?",
+                        access_token=access_token,
+                        phone_number_id=phone_number_id
+                    )
                 else:
                     logger.info(f"🙋 Skipping AI response for {phone_number} (human handoff active)")
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
-            # Check if customer is asking for a human
+            # Check if customer wants a human
             handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner', 'human agent']
             if any(trigger in message_body.lower() for trigger in handoff_triggers):
                 db.set_human_handoff(business_id, phone_number, True)
-                await send_whatsapp_message(phone_number, "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏")
+                await send_whatsapp_message(
+                    recipient_phone=phone_number,
+                    message_text="no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏",
+                    access_token=access_token,
+                    phone_number_id=phone_number_id
+                )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
-            # Launch background task to generate AI response and send via Meta API
-            # This allows us to return 200 OK instantly so Meta doesn't time out
+            # Process AI reply in background task
+            asyncio.create_task(_process_and_reply_meta(business_id, phone_number, message_body, sender_name))
+            
+        return JSONResponse(content={"status": "ok"}, status_code=200)
+    except Exception as e:
+        logger.error(f"❌ Error in per-business webhook: {str(e)}")
+        return JSONResponse(content={"status": "ok"}, status_code=200)
+
+
+@app.get("/webhook")
+async def verify_webhook(
+    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
+    hub_challenge: Optional[str] = Query(None, alias="hub.challenge")
+) -> PlainTextResponse:
+    """
+    Legacy Global WhatsApp Webhook Verification Endpoint (GET).
+    """
+    logger.info("📥 Received global webhook verification request")
+    if hub_mode == "subscribe" and hub_verify_token == WHATSAPP_VERIFY_TOKEN:
+        logger.info("✅ Global webhook verification successful!")
+        return PlainTextResponse(content=hub_challenge, status_code=200)
+    else:
+        logger.warning("❌ Global webhook verification failed - token mismatch!")
+        raise HTTPException(status_code=403, detail="Verification failed")
+
+
+@app.post("/webhook")
+async def handle_webhook(request: Request) -> JSONResponse:
+    """
+    Legacy Global WhatsApp Webhook Handler Endpoint (POST).
+    """
+    try:
+        body = await request.json()
+        logger.info("📨 Received global webhook event")
+        message_data = extract_message_data(body)
+        
+        if message_data:
+            phone_number, message_body, message_id, to_number = message_data
+            
+            # Look up the business ID based on the Meta WhatsApp number
+            business_id = db.get_business_id_by_phone(to_number)
+            if not business_id:
+                logger.warning(f"⚠️ No business found for number {to_number}. Ignored.")
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+            
+            # Forward directly to the scoped webhook handler logic dynamically
+            creds = db.get_business_credentials(business_id)
+            access_token = creds.get("meta_access_token")
+            phone_number_id = creds.get("meta_phone_number_id")
+            
+            try:
+                contacts = body["entry"][0]["changes"][0]["value"].get("contacts", [])
+                if contacts:
+                    sender_name = contacts[0].get("profile", {}).get("name", "")
+                    if sender_name:
+                        db.update_contact_name(business_id, phone_number, sender_name)
+            except (KeyError, IndexError):
+                pass
+            
+            await mark_message_as_read(message_id, access_token, phone_number_id)
+            
+            if db.is_human_handoff(business_id, phone_number):
+                if message_body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
+                    db.set_human_handoff(business_id, phone_number, False)
+                    await send_whatsapp_message(
+                        phone_number, 
+                        "bot is back online! how can i help you?",
+                        access_token,
+                        phone_number_id
+                    )
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
+            handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner', 'human agent']
+            if any(trigger in message_body.lower() for trigger in handoff_triggers):
+                db.set_human_handoff(business_id, phone_number, True)
+                await send_whatsapp_message(
+                    phone_number, 
+                    "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏",
+                    access_token,
+                    phone_number_id
+                )
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+            
             asyncio.create_task(_process_and_reply_meta(business_id, phone_number, message_body, sender_name))
         
-        else:
-            # This might be a status update or other event type
-            logger.debug("ℹ️ Non-message event received (status update, etc.)")
-        
-        # ALWAYS return 200 OK to acknowledge receipt
-        # Meta will retry if they don't receive a 200 response
         return JSONResponse(content={"status": "ok"}, status_code=200)
-        
     except Exception as e:
-        logger.error(f"❌ Error processing webhook: {str(e)}")
-        # STILL RETURN 200 TO PREVENT META FROM RETRYING
-        # LOG THE ERROR FOR DEBUGGING BUT DON'T EXPOSE IT
+        logger.error(f"❌ Error processing global webhook: {str(e)}")
         return JSONResponse(content={"status": "ok"}, status_code=200)
+
 
 async def _process_and_reply_meta(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
     """Background task: generate AI response, detect orders, then send via Meta Graph API."""
     try:
         # Simulate human typing delay (7 seconds) so it doesn't look like a bot
         await asyncio.sleep(7)
+        
+        # Get business credentials
+        creds = db.get_business_credentials(business_id)
+        access_token = creds.get("meta_access_token")
+        phone_number_id = creds.get("meta_phone_number_id")
         
         # Generate AI response using AI Engine (Multi-Tenant)
         ai_response = await ai_engine.generate_response(
@@ -509,8 +600,16 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
                 db.set_human_handoff(business_id, phone_number, True)
                 logger.info(f"🙋 AI triggered human handoff for {phone_number}")
 
-            # Detect if AI is sending payment details (order confirmation)
-            if "8137048851" in ai_response or "opay" in ai_response.lower():
+            # Dynamic Order Detection (Component 5)
+            business_config = db.get_business_config(business_id)
+            payment_info = business_config.get("payment_info", "")
+            
+            # Default fallback payment detection keywords
+            payment_keywords = ["bank", "transfer", "opay", "account", "payment", "pay", "8137048851"]
+            if payment_info:
+                payment_keywords.extend([w.lower() for w in payment_info.split() if len(w) > 3])
+                
+            if any(keyword in ai_response.lower() for keyword in payment_keywords) and ("account" in ai_response.lower() or "number" in ai_response.lower() or "pay" in ai_response.lower() or "transfer" in ai_response.lower()):
                 try:
                     customer_name = sender_name if sender_name else "Unknown"
                     db.save_order(
@@ -525,16 +624,41 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
                 except Exception as e:
                     logger.error(f"Error saving order: {e}")
 
-            # Send the AI response back to the user
-            success = await send_whatsapp_message(
-                recipient_phone=phone_number,
-                message_text=ai_response
-            )
+            # Extract [IMAGE:product_id] tokens (Component 6)
+            image_tokens = re.findall(r'\[IMAGE:([a-zA-Z0-9\-]+)\]', ai_response)
             
-            if success:
-                logger.info(f"✅ Response sent to {phone_number}")
-            else:
-                logger.error(f"❌ Failed to send response to {phone_number}")
+            # Strip image tokens from text response
+            clean_response = re.sub(r'\[IMAGE:[a-zA-Z0-9\-]+\]', '', ai_response).strip()
+            
+            # Send clean text response first
+            if clean_response:
+                await send_whatsapp_message(
+                    recipient_phone=phone_number,
+                    message_text=clean_response,
+                    access_token=access_token,
+                    phone_number_id=phone_number_id
+                )
+            
+            # Send images for each token
+            for prod_id in image_tokens:
+                product = db.get_product_by_id(prod_id)
+                if product and product.get("image_url"):
+                    caption = f"{product['name']}"
+                    if product.get('price'):
+                        try:
+                            price_val = float(product['price'])
+                            caption += f" — ₦{price_val:,.0f}"
+                        except Exception:
+                            caption += f" — ₦{product['price']}"
+                    await send_whatsapp_image(
+                        recipient_phone=phone_number,
+                        image_url=product["image_url"],
+                        caption=caption,
+                        access_token=access_token,
+                        phone_number_id=phone_number_id
+                    )
+                    logger.info(f"🖼️ Sent product image {prod_id} to {phone_number}")
+            
         else:
             logger.error("❌ AI engine returned empty response")
             
@@ -627,19 +751,27 @@ async def handle_twilio_webhook(
     return PlainTextResponse(str(resp), media_type="application/xml")
 
 
-async def _send_twilio_message(phone_number: str, message: str):
-    """Send a message via Twilio REST API."""
+async def _send_twilio_message(phone_number: str, message: str, media_url: str = None):
+    """Send a message via Twilio REST API, optionally with media/image attachments."""
     twilio_api_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    
+    data = {
+        "From": TWILIO_WHATSAPP_NUMBER,
+        "To": f"whatsapp:{phone_number}",
+        "Body": message
+    }
+    
+    if media_url:
+        data["MediaUrl"] = media_url
+        
     async with httpx.AsyncClient(timeout=30.0) as client:
-        await client.post(
+        response = await client.post(
             twilio_api_url,
             auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
-            data={
-                "From": TWILIO_WHATSAPP_NUMBER,
-                "To": f"whatsapp:{phone_number}",
-                "Body": message
-            }
+            data=data
         )
+        if response.status_code != 201:
+            logger.error(f"❌ Twilio REST API failed to send: {response.text}")
 
 
 async def _process_and_reply_twilio(business_id: str, phone_number: str, user_message: str, profile_name: str = None):
@@ -682,9 +814,32 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
             except Exception as e:
                 logger.error(f"Error saving order: {e}")
 
-        # Send the response via Twilio REST API
-        await _send_twilio_message(phone_number, ai_response)
-        logger.info(f"✅ Twilio reply sent to {phone_number}")
+        # Extract [IMAGE:product_id] tokens (Symmetrical to Meta webhook)
+        image_tokens = re.findall(r'\[IMAGE:([a-zA-Z0-9\-]+)\]', ai_response)
+        
+        # Strip image tokens from text response
+        clean_response = re.sub(r'\[IMAGE:[a-zA-Z0-9\-]+\]', '', ai_response).strip()
+
+        # Send clean text response first
+        if clean_response:
+            await _send_twilio_message(phone_number, clean_response)
+            logger.info(f"✅ Twilio text reply sent to {phone_number}")
+
+        # Send images for each token
+        for prod_id in image_tokens:
+            product = db.get_product_by_id(prod_id)
+            if product and product.get("image_url"):
+                caption = f"{product['name']}"
+                if product.get('price'):
+                    try:
+                        price_val = float(product['price'])
+                        caption += f" — ₦{price_val:,.0f}"
+                    except Exception:
+                        caption += f" — ₦{product['price']}"
+                
+                # Send the product image via Twilio REST API
+                await _send_twilio_message(phone_number, caption, product["image_url"])
+                logger.info(f"🖼️ Sent product image {prod_id} to {phone_number} via Twilio")
 
     except Exception as e:
         logger.error(f"❌ Background Twilio reply error: {str(e)}")
@@ -709,67 +864,90 @@ async def root():
 class SettingsUpdate(BaseModel):
     bot_mode: str
     business_name: str
+    business_id: Optional[str] = None
 
 @app.get("/settings")
-async def get_settings():
+async def get_settings(business_id: Optional[str] = Query(None)):
     """Get the current bot mode and business settings."""
+    if business_id:
+        return db.get_business_config(business_id)
     return db.get_settings()
 
 @app.post("/settings")
 async def update_settings(settings: SettingsUpdate):
     """Update the bot mode and business name."""
+    if settings.business_id:
+        # Update specific business bot mode
+        try:
+            res = db.client.table("businesses").update({
+                "bot_mode": settings.bot_mode,
+                "name": settings.business_name
+            }).eq("id", settings.business_id).execute()
+            if len(res.data) > 0:
+                return {"status": "success", "message": "Business settings updated"}
+        except Exception as e:
+            logger.error(f"Error updating business settings: {e}")
+            return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to update business settings"})
+    
     success = db.update_settings(settings.bot_mode, settings.business_name)
     if success:
         return {"status": "success", "message": "Settings updated"}
     return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to update settings"})
 
 @app.get("/health")
-async def health_check():
+async def health_check(business_id: Optional[str] = Query(None)):
     """Health check endpoint for monitoring and load balancers."""
     return {
         "status": "healthy",
         "ai_engine": "active",
-        "active_conversations": ai_engine.get_conversation_count()
+        "active_conversations": ai_engine.get_conversation_count(business_id)
     }
 
 
 @app.get("/stats")
-async def get_stats():
-    """Get comprehensive application statistics."""
-    stats = db.get_stats()
-    stats["active_conversations"] = ai_engine.get_conversation_count()
-    stats["whatsapp_configured"] = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID)
-    revenue = db.get_revenue_stats()
+async def get_stats(business_id: Optional[str] = Query(None)):
+    """Get comprehensive application statistics scoped to a business_id."""
+    stats = db.get_stats(business_id)
+    stats["active_conversations"] = ai_engine.get_conversation_count(business_id)
+    stats["whatsapp_configured"] = False
+    
+    if business_id:
+        creds = db.get_business_credentials(business_id)
+        stats["whatsapp_configured"] = bool(creds.get("meta_access_token") and creds.get("meta_phone_number_id"))
+    else:
+        stats["whatsapp_configured"] = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID)
+        
+    revenue = db.get_revenue_stats(business_id)
     stats.update(revenue)
-    handoffs = db.get_handoff_contacts()
+    handoffs = db.get_handoff_contacts(business_id)
     stats["pending_handoffs"] = len(handoffs)
     return stats
 
 
 @app.get("/contacts")
-async def get_contacts():
-    """Get all tracked contacts/leads."""
+async def get_contacts(business_id: Optional[str] = Query(None)):
+    """Get all tracked contacts/leads scoped to a business_id."""
     return {
-        "contacts": db.get_all_contacts(),
-        "total": db.get_stats()["total_contacts"]
+        "contacts": db.get_all_contacts(business_id),
+        "total": db.get_stats(business_id)["total_contacts"]
     }
 
 
 @app.get("/chats")
-async def get_chats(phone: str = None):
-    """Get full chat messages."""
+async def get_chats(business_id: Optional[str] = Query(None), phone: str = None):
+    """Get full chat messages scoped to a business_id."""
     if phone:
-        history = db.get_conversation_history(phone, limit=100)
+        history = db.get_conversation_history(business_id, phone, limit=100)
         return {
             "phone_number": phone,
             "messages": [
                 {"role": h["role"], "content": h["parts"][0]} for h in history
             ]
         }
-    contacts = db.get_all_contacts()
+    contacts = db.get_all_contacts(business_id)
     chats = []
     for contact in contacts:
-        history = db.get_conversation_history(contact["phone_number"], limit=100)
+        history = db.get_conversation_history(business_id, contact["phone_number"], limit=100)
         chats.append({
             "phone_number": contact["phone_number"],
             "name": contact.get("name"),
@@ -782,46 +960,65 @@ async def get_chats(phone: str = None):
 
 class BroadcastRequest(BaseModel):
     message: str
+    business_id: str
     phones: Optional[list] = None
 
 @app.post("/broadcast")
 async def send_broadcast(request: BroadcastRequest):
-    """Send a promotional/broadcast message to all or selected contacts."""
-    contacts = db.get_all_contacts()
+    """Send a promotional/broadcast message to all or selected contacts scoped to a business."""
+    contacts = db.get_all_contacts(request.business_id)
     
     # Filter if specific phones were provided
     if request.phones is not None and len(request.phones) > 0:
         contacts = [c for c in contacts if c["phone_number"] in request.phones]
         
+    creds = db.get_business_credentials(request.business_id)
+    access_token = creds.get("meta_access_token")
+    phone_number_id = creds.get("meta_phone_number_id")
+    
     success_count = 0
     fail_count = 0
     
     for contact in contacts:
         phone = contact["phone_number"]
         try:
-            await _send_twilio_message(phone, request.message)
-            success_count += 1
+            # Symmetrically try sending via Meta per-business credentials
+            success = await send_whatsapp_message(
+                recipient_phone=phone,
+                message_text=request.message,
+                access_token=access_token,
+                phone_number_id=phone_number_id
+            )
+            if success:
+                success_count += 1
+            else:
+                raise Exception("Meta API failed to send")
         except Exception as e:
-            logger.error(f"Failed to broadcast to {phone}: {str(e)}")
-            fail_count += 1
+            logger.error(f"Failed to broadcast to {phone} via Meta API, falling back to Twilio: {str(e)}")
+            try:
+                # Fallback to sandbox Twilio for testing
+                await _send_twilio_message(phone, request.message)
+                success_count += 1
+            except Exception as t_err:
+                logger.error(f"Twilio broadcast fallback also failed for {phone}: {str(t_err)}")
+                fail_count += 1
             
     return {"status": "success", "sent": success_count, "failed": fail_count}
 
 
-
 @app.delete("/chats/{phone}/clear")
-async def clear_chat(phone: str):
-    """Clear conversation history for a specific phone number."""
-    cleared = db.clear_conversation(phone)
+async def clear_chat(phone: str, business_id: Optional[str] = Query(None)):
+    """Clear conversation history for a specific phone number scoped to a business_id."""
+    cleared = db.clear_conversation(business_id, phone)
     return {"cleared": cleared, "phone_number": phone}
 
 
 @app.get("/orders")
-async def get_orders():
-    """Get all orders with revenue stats."""
+async def get_orders(business_id: Optional[str] = Query(None)):
+    """Get all orders scoped to a business_id."""
     return {
-        "orders": db.get_all_orders(),
-        "stats": db.get_revenue_stats()
+        "orders": db.get_all_orders(business_id),
+        "stats": db.get_revenue_stats(business_id)
     }
 
 
@@ -833,16 +1030,96 @@ async def update_order(order_id: int, status: str = Query(...)):
 
 
 @app.get("/handoffs")
-async def get_handoffs():
-    """Get all conversations waiting for human takeover."""
-    return {"handoffs": db.get_handoff_contacts()}
+async def get_handoffs(business_id: Optional[str] = Query(None)):
+    """Get all conversations waiting for human takeover scoped to a business_id."""
+    return {"handoffs": db.get_handoff_contacts(business_id)}
 
 
 @app.post("/handoffs/{phone}/resume")
-async def resume_bot(phone: str):
-    """Resume AI bot for a conversation after human takeover."""
-    db.set_human_handoff(phone, False)
+async def resume_bot(phone: str, business_id: Optional[str] = Query(None)):
+    """Resume AI bot for a conversation after human takeover scoped to a business_id."""
+    db.set_human_handoff(business_id, phone, False)
     return {"resumed": True, "phone_number": phone}
+
+
+# =============================================================================
+# PRODUCT CATALOG ENDPOINTS
+# =============================================================================
+
+class ProductCreate(BaseModel):
+    business_id: str
+    name: str
+    description: Optional[str] = ""
+    price: Optional[str] = ""
+    image_url: Optional[str] = ""
+    category: Optional[str] = ""
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price: Optional[str] = None
+    image_url: Optional[str] = None
+    category: Optional[str] = None
+    is_available: Optional[bool] = None
+
+
+@app.get("/products")
+async def get_products(business_id: str = Query(...)):
+    """Get all products/property listings for a business."""
+    products = db.get_products(business_id)
+    return {"products": products, "total": len(products)}
+
+
+@app.post("/products")
+async def add_product(product: ProductCreate):
+    """Add a new product/property listing with optional image URL."""
+    product_id = db.add_product(
+        business_id=product.business_id,
+        name=product.name,
+        description=product.description,
+        price=product.price,
+        image_url=product.image_url,
+        category=product.category
+    )
+    if product_id:
+        return {"status": "success", "product_id": product_id, "message": f"Product '{product.name}' added successfully"}
+    return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to add product"})
+
+
+@app.put("/products/{product_id}")
+async def update_product(product_id: str, product: ProductUpdate):
+    """Update an existing product/property listing."""
+    update_data = product.dict(exclude_none=True)
+    if not update_data:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No fields to update"})
+    
+    success = db.update_product(product_id, **update_data)
+    if success:
+        return {"status": "success", "message": "Product updated successfully"}
+    return JSONResponse(status_code=404, content={"status": "error", "message": "Product not found or update failed"})
+
+
+@app.delete("/products/{product_id}")
+async def delete_product(product_id: str):
+    """Delete a product/property listing."""
+    success = db.delete_product(product_id)
+    if success:
+        return {"status": "success", "message": "Product deleted successfully"}
+    return JSONResponse(status_code=404, content={"status": "error", "message": "Product not found or delete failed"})
+
+
+@app.put("/products/{product_id}/toggle")
+async def toggle_product_availability(product_id: str):
+    """Toggle a product's availability (show/hide from AI catalog)."""
+    product = db.get_product_by_id(product_id)
+    if not product:
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Product not found"})
+    
+    new_status = not product.get("is_available", True)
+    success = db.update_product(product_id, is_available=new_status)
+    if success:
+        return {"status": "success", "is_available": new_status, "message": f"Product {'shown' if new_status else 'hidden'} from AI catalog"}
+    return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to toggle product"})
 
 
 # =============================================================================

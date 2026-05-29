@@ -4,6 +4,8 @@ DATABASE MODULE - SUPABASE CLOUD STORAGE
 =============================================================================
 Handles all database operations using Supabase (PostgreSQL) for persistent 
 storage. Your data will never be wiped on deployments again.
+
+SaaS Multi-Tenant: All queries are scoped to business_id for data isolation.
 =============================================================================
 """
 
@@ -97,32 +99,37 @@ class Database:
         ]
         return history
 
-    def has_conversation(self, phone_number: str) -> bool:
-        if not self.client: return False
-        res = self.client.table("conversations").select("id", count="exact").eq("phone_number", phone_number).execute()
+    def has_conversation(self, business_id: str, phone_number: str) -> bool:
+        if not self.client or not business_id: return False
+        res = self.client.table("conversations").select("id", count="exact").eq("phone_number", phone_number).eq("business_id", business_id).execute()
         return res.count > 0 if res.count else False
 
-    def clear_conversation(self, phone_number: str) -> bool:
-        if not self.client: return False
-        res = self.client.table("conversations").delete().eq("phone_number", phone_number).execute()
+    def clear_conversation(self, business_id: str, phone_number: str) -> bool:
+        if not self.client or not business_id: return False
+        res = self.client.table("conversations").delete().eq("phone_number", phone_number).eq("business_id", business_id).execute()
         cleared = len(res.data) > 0
         if cleared:
             logger.info(f"🗑️ Conversation cleared for: {phone_number}")
         return cleared
 
-    def get_conversation_count(self) -> int:
+    def get_conversation_count(self, business_id: str = None) -> int:
         if not self.client: return 0
-        res = self.client.table("contacts").select("phone_number", count="exact").execute()
+        query = self.client.table("contacts").select("phone_number", count="exact")
+        if business_id:
+            query = query.eq("business_id", business_id)
+        res = query.execute()
         return res.count if res.count else 0
 
     # =========================================================================
     # CONTACT / LEAD OPERATIONS
     # =========================================================================
 
-    def get_all_contacts(self) -> list:
+    def get_all_contacts(self, business_id: str = None) -> list:
         if not self.client: return []
-        res = self.client.table("contacts").select("*").order("last_seen", desc=True).execute()
-        return res.data
+        query = self.client.table("contacts").select("*").order("last_seen", desc=True)
+        if business_id:
+            query = query.eq("business_id", business_id)
+        return query.execute().data
 
     def update_contact_name(self, business_id: str, phone_number: str, name: str):
         if not self.client or not business_id: return
@@ -134,25 +141,31 @@ class Database:
     # ANALYTICS / STATS
     # =========================================================================
 
-    def get_stats(self) -> dict:
+    def get_stats(self, business_id: str = None) -> dict:
         if not self.client:
             return {"total_contacts": 0, "total_messages": 0, "messages_today": 0, "conversations_today": 0, "top_contacts": []}
-            
-        contacts_res = self.client.table("contacts").select("*", count="exact").execute()
+        
+        contacts_query = self.client.table("contacts").select("*", count="exact")
+        msgs_query = self.client.table("conversations").select("*", count="exact")
+        top_query = self.client.table("contacts").select("phone_number, name, message_count, last_seen").order("message_count", desc=True).limit(5)
+        
+        if business_id:
+            contacts_query = contacts_query.eq("business_id", business_id)
+            msgs_query = msgs_query.eq("business_id", business_id)
+            top_query = top_query.eq("business_id", business_id)
+        
+        contacts_res = contacts_query.execute()
         total_contacts = contacts_res.count if contacts_res.count else 0
         
-        msgs_res = self.client.table("conversations").select("*", count="exact").execute()
+        msgs_res = msgs_query.execute()
         total_messages = msgs_res.count if msgs_res.count else 0
         
-        # For simplicity in REST without complex time queries, we'll return zeroes for "today" metrics for now, 
-        # or calculate in memory if there are few contacts.
-        # Top 5 contacts
-        top_res = self.client.table("contacts").select("phone_number, name, message_count, last_seen").order("message_count", desc=True).limit(5).execute()
+        top_res = top_query.execute()
         
         return {
             "total_contacts": total_contacts,
             "total_messages": total_messages,
-            "messages_today": 0,  # Simplified for Supabase migration
+            "messages_today": 0,
             "conversations_today": 0,
             "top_contacts": top_res.data
         }
@@ -176,21 +189,26 @@ class Database:
         logger.info(f"📦 Order #{order_id} saved for {phone_number}: {items} = {total_amount}")
         return order_id
 
-    def get_all_orders(self) -> list:
+    def get_all_orders(self, business_id: str = None) -> list:
         if not self.client: return []
-        res = self.client.table("orders").select("*").order("created_at", desc=True).execute()
-        return res.data
+        query = self.client.table("orders").select("*").order("created_at", desc=True)
+        if business_id:
+            query = query.eq("business_id", business_id)
+        return query.execute().data
 
     def update_order_status(self, order_id: int, status: str) -> bool:
         if not self.client: return False
         res = self.client.table("orders").update({"status": status}).eq("id", order_id).execute()
         return len(res.data) > 0
 
-    def get_revenue_stats(self) -> dict:
+    def get_revenue_stats(self, business_id: str = None) -> dict:
         if not self.client:
             return {"total_orders": 0, "total_revenue": 0, "orders_today": 0, "revenue_today": 0}
-            
-        res = self.client.table("orders").select("total_amount, status").neq("status", "cancelled").execute()
+        
+        query = self.client.table("orders").select("total_amount, status").neq("status", "cancelled")
+        if business_id:
+            query = query.eq("business_id", business_id)
+        res = query.execute()
         
         total_orders = len(res.data)
         total_revenue = sum(order.get("total_amount", 0) for order in res.data)
@@ -224,13 +242,15 @@ class Database:
             return bool(res.data[0].get("human_handoff", False))
         return False
 
-    def get_handoff_contacts(self) -> list:
+    def get_handoff_contacts(self, business_id: str = None) -> list:
         if not self.client: return []
-        res = self.client.table("contacts").select("*").eq("human_handoff", True).order("last_seen", desc=True).execute()
-        return res.data
+        query = self.client.table("contacts").select("*").eq("human_handoff", True).order("last_seen", desc=True)
+        if business_id:
+            query = query.eq("business_id", business_id)
+        return query.execute().data
 
     # =========================================================================
-    # SETTINGS / MODE OPERATIONS
+    # SETTINGS / MODE OPERATIONS (Legacy — kept for backward compatibility)
     # =========================================================================
 
     def get_settings(self) -> dict:
@@ -265,6 +285,129 @@ class Database:
         except Exception as e:
             logger.error(f"Error fetching business config: {e}")
         return {}
+
+    # =========================================================================
+    # WHATSAPP CREDENTIALS (SaaS — Per-Business)
+    # =========================================================================
+
+    def get_business_credentials(self, business_id: str) -> dict:
+        """Fetch a business's WhatsApp API credentials."""
+        if not self.client or not business_id: return {}
+        try:
+            res = self.client.table("businesses").select(
+                "meta_access_token, meta_phone_number_id, meta_verify_token, webhook_connected"
+            ).eq("id", business_id).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+        except Exception as e:
+            logger.error(f"Error fetching business credentials: {e}")
+        return {}
+
+    def save_business_credentials(self, business_id: str, access_token: str, phone_number_id: str, verify_token: str) -> bool:
+        """Save or update a business's WhatsApp API credentials."""
+        if not self.client or not business_id: return False
+        try:
+            res = self.client.table("businesses").update({
+                "meta_access_token": access_token,
+                "meta_phone_number_id": phone_number_id,
+                "meta_verify_token": verify_token
+            }).eq("id", business_id).execute()
+            return len(res.data) > 0
+        except Exception as e:
+            logger.error(f"Error saving business credentials: {e}")
+            return False
+
+    def mark_webhook_verified(self, business_id: str) -> bool:
+        """Mark a business's webhook as successfully verified."""
+        if not self.client or not business_id: return False
+        try:
+            res = self.client.table("businesses").update({
+                "webhook_connected": True,
+                "webhook_verified_at": datetime.utcnow().isoformat()
+            }).eq("id", business_id).execute()
+            return len(res.data) > 0
+        except Exception as e:
+            logger.error(f"Error marking webhook verified: {e}")
+            return False
+
+    # =========================================================================
+    # PRODUCT CATALOG (with Image Support)
+    # =========================================================================
+
+    def get_products(self, business_id: str) -> list:
+        """Get all products for a business."""
+        if not self.client or not business_id: return []
+        try:
+            res = self.client.table("products").select("*").eq("business_id", business_id).order("created_at", desc=True).execute()
+            return res.data
+        except Exception as e:
+            logger.error(f"Error fetching products: {e}")
+            return []
+
+    def get_product_by_id(self, product_id: str) -> dict:
+        """Get a single product by its ID."""
+        if not self.client or not product_id: return {}
+        try:
+            res = self.client.table("products").select("*").eq("id", product_id).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+        except Exception as e:
+            logger.error(f"Error fetching product: {e}")
+        return {}
+
+    def add_product(self, business_id: str, name: str, description: str = "", price: str = "", image_url: str = "", category: str = "") -> str:
+        """Add a product to the catalog. Returns the product ID."""
+        if not self.client or not business_id: return ""
+        try:
+            res = self.client.table("products").insert({
+                "business_id": business_id,
+                "name": name,
+                "description": description,
+                "price": price,
+                "image_url": image_url,
+                "category": category
+            }).execute()
+            product_id = res.data[0].get("id", "") if res.data else ""
+            logger.info(f"📦 Product '{name}' added for business {business_id}")
+            return product_id
+        except Exception as e:
+            logger.error(f"Error adding product: {e}")
+            return ""
+
+    def update_product(self, product_id: str, **kwargs) -> bool:
+        """Update a product's details. Pass any fields to update as keyword arguments."""
+        if not self.client or not product_id: return False
+        try:
+            update_data = {k: v for k, v in kwargs.items() if v is not None}
+            if not update_data:
+                return False
+            res = self.client.table("products").update(update_data).eq("id", product_id).execute()
+            return len(res.data) > 0
+        except Exception as e:
+            logger.error(f"Error updating product: {e}")
+            return False
+
+    def delete_product(self, product_id: str) -> bool:
+        """Delete a product from the catalog."""
+        if not self.client or not product_id: return False
+        try:
+            res = self.client.table("products").delete().eq("id", product_id).execute()
+            return len(res.data) > 0
+        except Exception as e:
+            logger.error(f"Error deleting product: {e}")
+            return False
+
+    def get_available_products(self, business_id: str) -> list:
+        """Get only available products (for AI prompt building)."""
+        if not self.client or not business_id: return []
+        try:
+            res = self.client.table("products").select(
+                "id, name, description, price, image_url, category"
+            ).eq("business_id", business_id).eq("is_available", True).execute()
+            return res.data
+        except Exception as e:
+            logger.error(f"Error fetching available products: {e}")
+            return []
 
 # =============================================================================
 # SINGLETON INSTANCE
