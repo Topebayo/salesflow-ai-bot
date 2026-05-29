@@ -15,11 +15,11 @@ import re
 import logging
 import asyncio
 import httpx
-from typing import Optional
+from typing import Optional, List
 from contextlib import asynccontextmanager
 
 from fastapi.responses import PlainTextResponse, JSONResponse
-from fastapi import FastAPI, Request, HTTPException, Query, Form
+from fastapi import FastAPI, Request, HTTPException, Query, Form, File, UploadFile
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.messaging_response import MessagingResponse
@@ -643,21 +643,39 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
             for prod_id in image_tokens:
                 product = db.get_product_by_id(prod_id)
                 if product and product.get("image_url"):
-                    caption = f"{product['name']}"
+                    # Parse multiple images if stored as a JSON array string
+                    images_to_send = []
+                    raw_url = product["image_url"]
+                    if raw_url.startswith("[") and raw_url.endswith("]"):
+                        try:
+                            import json
+                            images_to_send = json.loads(raw_url)
+                        except Exception:
+                            images_to_send = [raw_url]
+                    else:
+                        images_to_send = [raw_url]
+                    
+                    # Filter out empty URLs
+                    images_to_send = [u for u in images_to_send if u]
+                    
+                    base_caption = f"{product['name']}"
                     if product.get('price'):
                         try:
                             price_val = float(product['price'])
-                            caption += f" — ₦{price_val:,.0f}"
+                            base_caption += f" — ₦{price_val:,.0f}"
                         except Exception:
-                            caption += f" — ₦{product['price']}"
-                    await send_whatsapp_image(
-                        recipient_phone=phone_number,
-                        image_url=product["image_url"],
-                        caption=caption,
-                        access_token=access_token,
-                        phone_number_id=phone_number_id
-                    )
-                    logger.info(f"🖼️ Sent product image {prod_id} to {phone_number}")
+                            base_caption += f" — ₦{product['price']}"
+                    
+                    for i, img_url in enumerate(images_to_send):
+                        img_caption = f"{base_caption} (Photo {i+1}/{len(images_to_send)})" if len(images_to_send) > 1 else base_caption
+                        await send_whatsapp_image(
+                            recipient_phone=phone_number,
+                            image_url=img_url,
+                            caption=img_caption,
+                            access_token=access_token,
+                            phone_number_id=phone_number_id
+                        )
+                    logger.info(f"🖼️ Sent {len(images_to_send)} product image(s) for {prod_id} to {phone_number} via Meta")
             
         else:
             logger.error("❌ AI engine returned empty response")
@@ -829,17 +847,34 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
         for prod_id in image_tokens:
             product = db.get_product_by_id(prod_id)
             if product and product.get("image_url"):
-                caption = f"{product['name']}"
+                # Parse multiple images if stored as a JSON array string
+                images_to_send = []
+                raw_url = product["image_url"]
+                if raw_url.startswith("[") and raw_url.endswith("]"):
+                    try:
+                        import json
+                        images_to_send = json.loads(raw_url)
+                    except Exception:
+                        images_to_send = [raw_url]
+                else:
+                    images_to_send = [raw_url]
+                
+                # Filter out empty URLs
+                images_to_send = [u for u in images_to_send if u]
+                
+                base_caption = f"{product['name']}"
                 if product.get('price'):
                     try:
                         price_val = float(product['price'])
-                        caption += f" — ₦{price_val:,.0f}"
+                        base_caption += f" — ₦{price_val:,.0f}"
                     except Exception:
-                        caption += f" — ₦{product['price']}"
+                        base_caption += f" — ₦{product['price']}"
                 
-                # Send the product image via Twilio REST API
-                await _send_twilio_message(phone_number, caption, product["image_url"])
-                logger.info(f"🖼️ Sent product image {prod_id} to {phone_number} via Twilio")
+                # Send all the product images via Twilio REST API
+                for i, img_url in enumerate(images_to_send):
+                    img_caption = f"{base_caption} (Photo {i+1}/{len(images_to_send)})" if len(images_to_send) > 1 else base_caption
+                    await _send_twilio_message(phone_number, img_caption, img_url)
+                logger.info(f"🖼️ Sent {len(images_to_send)} product image(s) for {prod_id} to {phone_number} via Twilio")
 
     except Exception as e:
         logger.error(f"❌ Background Twilio reply error: {str(e)}")
@@ -1120,6 +1155,47 @@ async def toggle_product_availability(product_id: str):
     if success:
         return {"status": "success", "is_available": new_status, "message": f"Product {'shown' if new_status else 'hidden'} from AI catalog"}
     return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to toggle product"})
+
+
+@app.post("/products/upload-image")
+async def upload_product_image(
+    business_id: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """
+    Upload a product/property image securely to Supabase Storage using the service role key.
+    This bypasses client-side RLS policies and resolves the RLS policy error.
+    """
+    if not db.client:
+        return JSONResponse(status_code=500, content={"status": "error", "message": "Database not initialized"})
+    
+    try:
+        # Read file contents
+        contents = await file.read()
+        
+        # Build file path
+        # format: {business_id}/{timestamp}_{filename}
+        import time
+        timestamp = int(time.time() * 1000)
+        clean_filename = re.sub(r'[^a-zA-Z0-9_.-]', '', file.filename)
+        file_path = f"{business_id}/{timestamp}_{clean_filename}"
+        
+        # Upload securely via python client (which uses the secret service role key)
+        db.client.storage.from_("product-images").upload(
+            path=file_path,
+            file=contents,
+            file_options={"content-type": file.content_type}
+        )
+        
+        # Get public url (which returns a direct string)
+        public_url = db.client.storage.from_("product-images").get_public_url(file_path)
+        
+        logger.info(f"✅ Securely uploaded product image for business {business_id}: {public_url}")
+        return {"status": "success", "public_url": public_url}
+        
+    except Exception as e:
+        logger.error(f"❌ Secure image upload failed: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"Upload failed: {str(e)}"})
 
 
 # =============================================================================
