@@ -345,11 +345,13 @@ ABOUT THE BUSINESS: {description}
             prompt += f"""
 VISUAL PRODUCT CATALOG WITH IMAGES:
 {product_list_str}
-IMPORTANT INSTRUCTIONS FOR SENDING IMAGES:
-If the customer asks to see a photo, image, or preview of any product/property, you MUST append the token [IMAGE:product_id] at the very end of your response, where product_id is the exact ID of the product from the list above.
-Example: "Here is the beautiful Casamigos! [IMAGE:some-uuid-here]"
-You can include multiple image tokens if they ask for multiple products: "Here are the photos! [IMAGE:uuid-1] [IMAGE:uuid-2]"
-Do NOT invent product images or IDs that are not in the list above.
+CRITICAL IMAGE SENDING INSTRUCTIONS:
+1. ONLY include the [IMAGE:product_id] token if the customer EXPLICITLY asks to see a photo, picture, image, or preview of a specific product/property (e.g., "send photos", "show me pictures", "can I see it?", "do you have pictures?").
+2. DO NOT include any [IMAGE:product_id] tokens proactively. If the customer is only asking about prices, locations, budget, or general details, DO NOT include any image tokens. Wait until they explicitly ask to see photos.
+3. ONLY send the image token for the SPECIFIC product, location, or item that the customer requested. If they ask for "photos of the Ring Road apartment", only include [IMAGE:product_id] for the Ring Road apartment. DO NOT include tokens for other properties you mentioned (e.g. Bodija) unless the customer explicitly asked for those photos as well.
+4. If a customer is asking about multiple properties but has not explicitly requested photos for them, DO NOT send any image tokens.
+5. Example format when explicitly requested: "Here is the photo of the Ring Road property! [IMAGE:some-uuid-here]"
+6. Do NOT invent product images or IDs that are not in the list above.
 """
         elif products:
             prompt += f"""
