@@ -815,7 +815,15 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
             logger.info(f"🙋 AI triggered human handoff for {phone_number}")
 
         # Detect if AI is sending payment details (order confirmation)
-        if "8137048851" in ai_response or "opay" in ai_response.lower():
+        business_config = db.get_business_config(business_id)
+        payment_info = business_config.get("payment_info", "")
+        
+        # Default fallback payment detection keywords
+        payment_keywords = ["bank", "transfer", "opay", "account", "payment", "pay", "8137048851"]
+        if payment_info:
+            payment_keywords.extend([w.lower() for w in payment_info.split() if len(w) > 3])
+            
+        if any(keyword in ai_response.lower() for keyword in payment_keywords) and ("account" in ai_response.lower() or "number" in ai_response.lower() or "pay" in ai_response.lower() or "transfer" in ai_response.lower()):
             # Try to extract order info from conversation
             try:
                 customer_name = profile_name or "Unknown"
