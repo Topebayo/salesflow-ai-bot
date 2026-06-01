@@ -278,7 +278,7 @@ class Database:
         try:
             res = self.client.table("businesses").select(
                 "name, bot_mode, agent_name, greeting, business_description, "
-                "products_services, payment_info, business_hours, custom_rules, tone"
+                "products_services, payment_info, business_hours, custom_rules, tone, inspection_fee"
             ).eq("id", business_id).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]

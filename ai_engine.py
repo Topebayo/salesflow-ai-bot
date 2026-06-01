@@ -241,13 +241,13 @@ User: "which other areas do you have"
 You: "for that budget we also have nice options in ajah and sangotedo. much more affordable too, room and parlour goes for 400k to 800k there"
 
 User: "can i come see it tomorrow"
-You: "sure! let me connect you with the lead agent to set up the viewing. someone will reach out to you shortly [HANDOFF_TRIGGERED]"
+You: "sure! we require an inspection fee to be paid before we go for inspections. once that is sorted, i will connect you with the lead agent [HANDOFF_TRIGGERED]"
 
 User: "are you legit"
 You: "yes sir, you can check our page for reviews and past clients. we've been in the business for years"
 
 HANDOFF PROTOCOL:
-If the customer wants to schedule a viewing, speak to the agent directly, or asks for a callback, end your reply with: [HANDOFF_TRIGGERED]
+If the customer wants to schedule an inspection, speak to the agent directly, or asks for a callback, end your reply with: [HANDOFF_TRIGGERED]
 Do NOT write the token visibly. Just append it at the very end.
 
 REMEMBER: You are Temitope, a real person texting on WhatsApp. Short, casual, helpful. No robot talk. NEVER suggest expensive areas for low budgets.
@@ -294,6 +294,8 @@ class GroqAIEngine:
         payment = config.get("payment_info", "")
         hours = config.get("business_hours", "")
         rules = config.get("custom_rules", "")
+        bot_mode = config.get("bot_mode", "retail")
+        inspection_fee = config.get("inspection_fee", "0")
 
         # Tone mapping
         tone_instructions = {
@@ -303,6 +305,8 @@ class GroqAIEngine:
             "gen_z": "Use trendy Gen-Z language. Be fun, use slang naturally, keep it vibey."
         }
 
+        rule_4 = "Be helpful and guide customers toward a property inspection." if bot_mode == "real_estate" else "Be helpful and guide customers toward a purchase or booking."
+
         prompt = f"""You are {agent_name}, a sales assistant for {business_name} chatting with customers on WhatsApp.
 
 TONE: {tone_instructions.get(tone, tone_instructions['friendly'])}
@@ -311,7 +315,7 @@ CRITICAL RULES:
 1. Keep responses SHORT. Max 2-3 sentences. No long paragraphs.
 2. NEVER use bullet points, numbered lists, asterisks, or markdown formatting. Just type like a real person on WhatsApp.
 3. ONE question at a time. Don't overwhelm the customer.
-4. Be helpful and guide customers toward a purchase or booking.
+4. {rule_4}
 """
 
         if greeting:
@@ -361,6 +365,17 @@ PRODUCTS / SERVICES & PRICES:
 IMPORTANT: Only recommend products/services from this list. Do NOT make up items or prices that are not listed above.
 """
 
+        if bot_mode == "real_estate":
+            fee_val = str(inspection_fee).strip()
+            if fee_val and fee_val != "0":
+                prompt += f"""
+INSPECTION FEE POLICY:
+- An inspection fee of {fee_val} must be paid BEFORE scheduling any property inspection.
+- When a customer asks to inspect a property, schedule an inspection, or go see a property, you MUST politely inform them that they need to pay an inspection fee of {fee_val} to book/schedule it.
+- Never schedule or promise an inspection without mentioning the fee.
+- Provide the payment details: {payment} if they ask or when they want to inspect.
+"""
+
         if payment:
             prompt += f"""
 PAYMENT: When a customer is ready to pay, give them these payment details: {payment}
@@ -377,7 +392,16 @@ SPECIAL RULES:
 {rules}
 """
 
-        prompt += """
+        if bot_mode == "real_estate":
+            prompt += """
+HANDOFF PROTOCOL:
+If a customer explicitly asks to speak to a human, customer service, the owner, or wants to schedule/book an inspection, end your reply with: [HANDOFF_TRIGGERED]
+Do NOT write the token visibly. Just append it at the very end of your message.
+
+REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natural.
+"""
+        else:
+            prompt += """
 HANDOFF PROTOCOL:
 If a customer explicitly asks to speak to a human, customer service, the owner, or wants to schedule a viewing/meeting, end your reply with: [HANDOFF_TRIGGERED]
 Do NOT write the token visibly. Just append it at the very end of your message.
