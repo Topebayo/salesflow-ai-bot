@@ -397,6 +397,67 @@ class Database:
             logger.error(f"Error deleting product: {e}")
             return False
 
+    def get_daily_analytics(self, business_id: str) -> dict:
+        """Get daily registrations and messages volume for the last 7 days."""
+        if not self.client or not business_id:
+            return {"dates": [], "leads": [], "messages": []}
+            
+        try:
+            import datetime
+            today = datetime.date.today()
+            # Generate the last 7 days
+            last_7_days = [today - datetime.timedelta(days=i) for i in range(6, -1, -1)]
+            date_strings = [d.strftime("%Y-%m-%d") for d in last_7_days]
+            
+            # Initialize metrics maps
+            leads_map = {d: 0 for d in date_strings}
+            msgs_map = {d: 0 for d in date_strings}
+            
+            # Fetch all contacts for this business to aggregate by creation date
+            # filter for contacts created in the last 7 days
+            seven_days_ago = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).isoformat()
+            
+            contacts_res = self.client.table("contacts").select("first_seen").eq("business_id", business_id).gte("first_seen", seven_days_ago).execute()
+            if contacts_res.data:
+                for c in contacts_res.data:
+                    fs = c.get("first_seen")
+                    if fs:
+                        date_part = fs.split("T")[0]
+                        if date_part in leads_map:
+                            leads_map[date_part] += 1
+            
+            # Fetch conversations for the last 7 days
+            convos_res = self.client.table("conversations").select("timestamp").eq("business_id", business_id).gte("timestamp", seven_days_ago).execute()
+            if convos_res.data:
+                for m in convos_res.data:
+                    ts = m.get("timestamp")
+                    if ts:
+                        date_part = ts.split("T")[0]
+                        if date_part in msgs_map:
+                            msgs_map[date_part] += 1
+                            
+            # Convert maps back to lists matching date_strings order
+            leads_list = [leads_map[d] for d in date_strings]
+            msgs_list = [msgs_map[d] for d in date_strings]
+            
+            # Return human-readable label formats (e.g. "May 31")
+            formatted_dates = []
+            for d_str in date_strings:
+                try:
+                    dt = datetime.datetime.strptime(d_str, "%Y-%m-%d")
+                    formatted_dates.append(dt.strftime("%b %d"))
+                except Exception:
+                    formatted_dates.append(d_str)
+                    
+            return {
+                "dates": formatted_dates,
+                "leads": leads_list,
+                "messages": msgs_list
+            }
+        except Exception as e:
+            logger.error(f"Error fetching daily analytics: {e}")
+            return {"dates": [], "leads": [], "messages": []}
+
     def get_available_products(self, business_id: str) -> list:
         """Get only available products (for AI prompt building)."""
         if not self.client or not business_id: return []

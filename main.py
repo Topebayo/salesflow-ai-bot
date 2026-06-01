@@ -959,6 +959,66 @@ async def get_stats(business_id: Optional[str] = Query(None)):
     return stats
 
 
+@app.get("/stats/daily")
+async def get_daily_stats(business_id: str = Query(...)):
+    """Get 7-day daily lead registration and message frequency stats."""
+    return db.get_daily_analytics(business_id)
+
+
+class ManualMessageRequest(BaseModel):
+    business_id: str
+    phone_number: str
+    message: str
+
+
+@app.post("/chats/send")
+async def send_manual_message(req: ManualMessageRequest):
+    """Manually send a message to a WhatsApp lead, logging it to database history."""
+    if not req.business_id or not req.phone_number or not req.message:
+        raise HTTPException(status_code=400, detail="Missing required parameters")
+        
+    # 1. Log manual message to local database history
+    db.save_message(req.business_id, req.phone_number, "model", req.message)
+    
+    # 2. Check business WhatsApp Graph API credentials
+    creds = db.get_business_credentials(req.business_id)
+    access_token = creds.get("meta_access_token")
+    phone_number_id = creds.get("meta_phone_number_id")
+    
+    success = False
+    
+    # Try sending via WhatsApp Meta API first if credentials exist
+    if access_token and phone_number_id:
+        try:
+            success = await send_whatsapp_message(
+                recipient_phone=req.phone_number,
+                message_text=req.message,
+                access_token=access_token,
+                phone_number_id=phone_number_id
+            )
+            if success:
+                logger.info(f"✅ Manual message sent to {req.phone_number} via Meta Graph API")
+        except Exception as e:
+            logger.error(f"Failed to send manual message via Meta: {e}")
+            
+    # Fallback to Twilio sandbox if Meta credentials are not configured
+    if not success:
+        try:
+            await _send_twilio_message(req.phone_number, req.message)
+            success = True
+            logger.info(f"✅ Manual message sent to {req.phone_number} via Twilio sandbox fallback")
+        except Exception as e:
+            logger.error(f"Failed to send manual message via Twilio fallback: {e}")
+            
+    if success:
+        return {"status": "success", "message": "Message sent and logged successfully"}
+    else:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": "Failed to deliver manual message via WhatsApp"}
+        )
+
+
 @app.get("/contacts")
 async def get_contacts(business_id: Optional[str] = Query(None)):
     """Get all tracked contacts/leads scoped to a business_id."""
@@ -1075,6 +1135,13 @@ async def resume_bot(phone: str, business_id: Optional[str] = Query(None)):
     """Resume AI bot for a conversation after human takeover scoped to a business_id."""
     db.set_human_handoff(business_id, phone, False)
     return {"resumed": True, "phone_number": phone}
+
+
+@app.post("/handoffs/{phone}/takeover")
+async def takeover_chat(phone: str, business_id: Optional[str] = Query(None)):
+    """Take over conversation manually (sets human_handoff = True) scoped to a business_id."""
+    db.set_human_handoff(business_id, phone, True)
+    return {"takeover": True, "phone_number": phone}
 
 
 # =============================================================================
