@@ -683,9 +683,6 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
     except Exception as e:
         logger.error(f"❌ Background Meta reply error: {str(e)}")
 
-# Temporary memory for sandbox routing (Maps customer phone -> business_id)
-SANDBOX_SESSIONS = {}
-
 @app.post("/twilio/webhook")
 async def handle_twilio_webhook(
     From: str = Form(...),
@@ -713,8 +710,8 @@ async def handle_twilio_webhook(
             # Search for the business by name
             res = db.client.table("businesses").select("id, name").ilike("name", f"%{target_name}%").execute()
             if res.data and len(res.data) > 0:
-                SANDBOX_SESSIONS[phone_number] = res.data[0]["id"]
-                logger.info(f"🔌 Sandox user {phone_number} connected to {res.data[0]['name']}")
+                db.set_sandbox_session(phone_number, res.data[0]["id"])
+                logger.info(f"🔌 Sandbox user {phone_number} connected to {res.data[0]['name']}")
                 
                 # Send instant confirmation
                 resp = MessagingResponse()
@@ -728,7 +725,7 @@ async def handle_twilio_webhook(
             logger.error(f"Error switching sandbox: {e}")
 
     # Look up business ID (Check Sandbox Sessions first, then fallback to database)
-    business_id = SANDBOX_SESSIONS.get(phone_number)
+    business_id = db.get_sandbox_session(phone_number)
     if not business_id:
         business_id = db.get_business_id_by_phone(to_number)
         

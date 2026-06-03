@@ -54,6 +54,32 @@ class Database:
         return None
 
     # =========================================================================
+    # SANDBOX SESSIONS (TEST SWITCHER)
+    # =========================================================================
+    def get_sandbox_session(self, phone_number: str) -> str:
+        if not self.client: return None
+        try:
+            res = self.client.table("sandbox_sessions").select("business_id").eq("phone_number", phone_number).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]["business_id"]
+        except Exception as e:
+            logger.error(f"Error fetching sandbox session: {e}")
+        return None
+
+    def set_sandbox_session(self, phone_number: str, business_id: str) -> bool:
+        if not self.client: return False
+        try:
+            res = self.client.table("sandbox_sessions").upsert({
+                "phone_number": phone_number,
+                "business_id": business_id,
+                "updated_at": datetime.utcnow().isoformat()
+            }).execute()
+            return len(res.data) > 0
+        except Exception as e:
+            logger.error(f"Error setting sandbox session: {e}")
+            return False
+
+    # =========================================================================
     # CONVERSATION OPERATIONS
     # =========================================================================
 
