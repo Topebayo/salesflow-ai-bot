@@ -317,12 +317,11 @@ class Database:
     # =========================================================================
 
     def get_business_credentials(self, business_id: str) -> dict:
-        """Fetch a business's Meta API credentials (both WhatsApp and Instagram)."""
+        """Fetch a business's WhatsApp API credentials."""
         if not self.client or not business_id: return {}
         try:
             res = self.client.table("businesses").select(
-                "meta_access_token, meta_phone_number_id, meta_verify_token, webhook_connected, "
-                "instagram_page_id, instagram_access_token, instagram_verify_token, instagram_webhook_connected"
+                "meta_access_token, meta_phone_number_id, meta_verify_token, webhook_connected"
             ).eq("id", business_id).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]
@@ -345,7 +344,7 @@ class Database:
             return False
 
     def mark_webhook_verified(self, business_id: str) -> bool:
-        """Mark a business's WhatsApp webhook as successfully verified."""
+        """Mark a business's webhook as successfully verified."""
         if not self.client or not business_id: return False
         try:
             res = self.client.table("businesses").update({
@@ -355,48 +354,6 @@ class Database:
             return len(res.data) > 0
         except Exception as e:
             logger.error(f"Error marking webhook verified: {e}")
-            return False
-
-    # =========================================================================
-    # INSTAGRAM CREDENTIALS (SaaS — Per-Business)
-    # =========================================================================
-
-    def get_business_id_by_instagram_page(self, page_id: str) -> str:
-        """Resolve business ID based on the Facebook Page ID linked to Instagram."""
-        if not self.client or not page_id: return None
-        try:
-            res = self.client.table("businesses").select("id").eq("instagram_page_id", page_id).execute()
-            if res.data and len(res.data) > 0:
-                return res.data[0]["id"]
-        except Exception as e:
-            logger.error(f"Error looking up business ID by Instagram Page ID: {e}")
-        return None
-
-    def save_instagram_credentials(self, business_id: str, page_id: str, access_token: str, verify_token: str) -> bool:
-        """Save or update a business's Instagram API credentials."""
-        if not self.client or not business_id: return False
-        try:
-            res = self.client.table("businesses").update({
-                "instagram_page_id": page_id,
-                "instagram_access_token": access_token,
-                "instagram_verify_token": verify_token
-            }).eq("id", business_id).execute()
-            return len(res.data) > 0
-        except Exception as e:
-            logger.error(f"Error saving Instagram credentials: {e}")
-            return False
-
-    def mark_instagram_webhook_verified(self, business_id: str) -> bool:
-        """Mark a business's Instagram webhook as successfully verified."""
-        if not self.client or not business_id: return False
-        try:
-            res = self.client.table("businesses").update({
-                "instagram_webhook_connected": True,
-                "instagram_webhook_verified_at": datetime.utcnow().isoformat()
-            }).eq("id", business_id).execute()
-            return len(res.data) > 0
-        except Exception as e:
-            logger.error(f"Error marking Instagram webhook verified: {e}")
             return False
 
     # =========================================================================

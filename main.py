@@ -384,180 +384,6 @@ async def mark_message_as_read(
         return False
 
 
-def extract_instagram_message_data(body: dict) -> Optional[tuple[str, str, str, str]]:
-    """
-    Extract the sender's Instagram scoped ID (prefixed with instagram:), message body,
-    message ID, and receiving Page ID from the Instagram webhook payload.
-    """
-    try:
-        if body.get("object") != "instagram":
-            return None
-        entry = body.get("entry", [])
-        if not entry:
-            return None
-        messaging = entry[0].get("messaging", [])
-        if not messaging:
-            return None
-        message_event = messaging[0]
-        
-        # Ensure it is a message event
-        if "message" not in message_event:
-            return None
-            
-        message = message_event["message"]
-        sender_id = message_event["sender"]["id"]
-        recipient_id = message_event["recipient"]["id"]
-        message_id = message.get("mid")
-        message_text = message.get("text", "")
-        
-        # Handle media/attachments
-        if not message_text and "attachments" in message:
-            message_text = "[Media/Attachment received]"
-            
-        # Prefix sender ID so we know it's an Instagram source
-        phone_number = f"instagram:{sender_id}"
-        
-        return phone_number, message_text, message_id, recipient_id
-    except Exception as e:
-        logger.error(f"Error parsing Instagram message data: {str(e)}")
-        return None
-
-
-async def send_instagram_message(
-    recipient_id: str,
-    message_text: str,
-    access_token: str,
-    page_id: str
-) -> bool:
-    """
-    Send an Instagram message via the Meta Graph API.
-    """
-    if not access_token or not page_id:
-        logger.error("❌ Instagram credentials (token or page ID) not configured!")
-        return False
-        
-    api_url = f"https://graph.facebook.com/v18.0/{page_id}/messages"
-    
-    # Strip prefix if present
-    clean_recipient = recipient_id.split("instagram:")[1] if recipient_id.startswith("instagram:") else recipient_id
-    
-    headers = {
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "recipient": {"id": clean_recipient},
-        "message": {"text": message_text}
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{api_url}?access_token={access_token}",
-                headers=headers,
-                json=payload
-            )
-            if response.status_code == 200:
-                logger.info(f"✅ Instagram message sent successfully to {clean_recipient}")
-                return True
-            else:
-                logger.error(f"❌ Failed to send Instagram message: {response.status_code} - {response.text}")
-                return False
-    except Exception as e:
-        logger.error(f"❌ Error sending Instagram message: {str(e)}")
-        return False
-
-
-async def send_instagram_image(
-    recipient_id: str,
-    image_url: str,
-    access_token: str,
-    page_id: str
-) -> bool:
-    """
-    Send an Instagram image message via the Meta Graph API using the attachment payload.
-    """
-    if not access_token or not page_id:
-        logger.error("❌ Instagram credentials not configured for image sending!")
-        return False
-        
-    api_url = f"https://graph.facebook.com/v18.0/{page_id}/messages"
-    
-    # Strip prefix if present
-    clean_recipient = recipient_id.split("instagram:")[1] if recipient_id.startswith("instagram:") else recipient_id
-    
-    headers = {
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "recipient": {"id": clean_recipient},
-        "message": {
-            "attachment": {
-                "type": "image",
-                "payload": {
-                    "url": image_url,
-                    "is_reusable": True
-                }
-            }
-        }
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{api_url}?access_token={access_token}",
-                headers=headers,
-                json=payload
-            )
-            if response.status_code == 200:
-                logger.info(f"✅ Instagram image attachment sent to {clean_recipient}")
-                return True
-            else:
-                logger.error(f"❌ Failed to send Instagram image: {response.status_code} - {response.text}")
-                return False
-    except Exception as e:
-        logger.error(f"❌ Error sending Instagram image: {str(e)}")
-        return False
-
-
-async def mark_instagram_message_as_read(
-    recipient_id: str,
-    access_token: str,
-    page_id: str
-) -> bool:
-    """
-    Send the 'mark_seen' sender action to mark Instagram message as read.
-    """
-    if not access_token or not page_id:
-        return False
-        
-    api_url = f"https://graph.facebook.com/v18.0/{page_id}/messages"
-    clean_recipient = recipient_id.split("instagram:")[1] if recipient_id.startswith("instagram:") else recipient_id
-    
-    headers = {
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "recipient": {"id": clean_recipient},
-        "sender_action": "mark_seen"
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{api_url}?access_token={access_token}",
-                headers=headers,
-                json=payload
-            )
-            return response.status_code == 200
-    except Exception as e:
-        logger.debug(f"Could not mark Instagram message as read: {str(e)}")
-        return False
-
-
-
 # =============================================================================
 # WEBHOOK ENDPOINTS
 # ================================================# =============================================================================
@@ -572,27 +398,23 @@ async def verify_business_webhook(
     hub_challenge: Optional[str] = Query(None, alias="hub.challenge")
 ) -> PlainTextResponse:
     """
-    Per-business Meta Webhook Verification Endpoint (GET) for WhatsApp and Instagram.
+    Per-business WhatsApp Webhook Verification Endpoint (GET).
     Looks up credentials in the database to verify the handshake.
     """
     logger.info(f"📥 Received webhook verification request for business: {business_id}")
     
     # Fetch business credentials
     creds = db.get_business_credentials(business_id)
-    expected_whatsapp_token = creds.get("meta_verify_token") or WHATSAPP_VERIFY_TOKEN
-    expected_instagram_token = creds.get("instagram_verify_token")
+    expected_token = creds.get("meta_verify_token")
     
-    verified = False
-    if hub_verify_token == expected_whatsapp_token:
-        db.mark_webhook_verified(business_id)
-        verified = True
-        logger.info(f"✅ WhatsApp Webhook verification successful for business: {business_id}!")
-    elif expected_instagram_token and hub_verify_token == expected_instagram_token:
-        db.mark_instagram_webhook_verified(business_id)
-        verified = True
-        logger.info(f"✅ Instagram Webhook verification successful for business: {business_id}!")
+    # Fallback to global verify token if no business-specific token exists yet
+    if not expected_token:
+        expected_token = WHATSAPP_VERIFY_TOKEN
         
-    if hub_mode == "subscribe" and verified:
+    if hub_mode == "subscribe" and hub_verify_token == expected_token:
+        logger.info(f"✅ Webhook verification successful for business: {business_id}!")
+        # Mark as connected in the DB
+        db.mark_webhook_verified(business_id)
         return PlainTextResponse(content=hub_challenge, status_code=200)
     else:
         logger.warning(f"❌ Webhook verification failed for business: {business_id} — token mismatch!")
@@ -602,70 +424,46 @@ async def verify_business_webhook(
 @app.post("/webhook/{business_id}")
 async def handle_business_webhook(business_id: str, request: Request) -> JSONResponse:
     """
-    Per-business Meta Webhook Handler Endpoint (POST) for WhatsApp and Instagram.
-    Scores and routes incoming events directly for the specific business ID.
+    Per-business WhatsApp Webhook Handler Endpoint (POST).
+    Scores and routes incoming WhatsApp events directly for the specific business ID.
     """
     try:
         body = await request.json()
         logger.info(f"📨 Received webhook event for business {business_id}")
         logger.debug(f"Payload: {body}")
         
-        is_instagram = (body.get("object") == "instagram")
-        if is_instagram:
-            message_data = extract_instagram_message_data(body)
-        else:
-            message_data = extract_message_data(body)
+        message_data = extract_message_data(body)
         
         if message_data:
             phone_number, message_body, message_id, to_number = message_data
             logger.info(f"📱 Message from {phone_number} (scoped to business {business_id}): {message_body[:50]}...")
             
             # Save sender name if present
-            sender_name = "Instagram User" if is_instagram else "Unknown"
             try:
-                if is_instagram:
-                    db.update_contact_name(business_id, phone_number, sender_name)
-                else:
-                    contacts = body["entry"][0]["changes"][0]["value"].get("contacts", [])
-                    if contacts:
-                        sender_name = contacts[0].get("profile", {}).get("name", "")
-                        if sender_name:
-                            db.update_contact_name(business_id, phone_number, sender_name)
+                contacts = body["entry"][0]["changes"][0]["value"].get("contacts", [])
+                if contacts:
+                    sender_name = contacts[0].get("profile", {}).get("name", "")
+                    if sender_name:
+                        db.update_contact_name(business_id, phone_number, sender_name)
             except (KeyError, IndexError):
                 pass
             
             # Mark read using business credentials
             creds = db.get_business_credentials(business_id)
             access_token = creds.get("meta_access_token")
-            
-            if is_instagram:
-                ig_access_token = creds.get("instagram_access_token") or access_token
-                ig_page_id = creds.get("instagram_page_id")
-                await mark_instagram_message_as_read(phone_number, ig_access_token, ig_page_id)
-            else:
-                phone_number_id = creds.get("meta_phone_number_id")
-                await mark_message_as_read(message_id, access_token, phone_number_id)
+            phone_number_id = creds.get("meta_phone_number_id")
+            await mark_message_as_read(message_id, access_token, phone_number_id)
             
             # Check human handoff
             if db.is_human_handoff(business_id, phone_number):
                 if message_body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
                     db.set_human_handoff(business_id, phone_number, False)
-                    if is_instagram:
-                        ig_access_token = creds.get("instagram_access_token") or access_token
-                        ig_page_id = creds.get("instagram_page_id")
-                        await send_instagram_message(
-                            recipient_id=phone_number,
-                            message_text="bot is back online! how can i help you?",
-                            access_token=ig_access_token,
-                            page_id=ig_page_id
-                        )
-                    else:
-                        await send_whatsapp_message(
-                            recipient_phone=phone_number,
-                            message_text="bot is back online! how can i help you?",
-                            access_token=access_token,
-                            phone_number_id=phone_number_id
-                        )
+                    await send_whatsapp_message(
+                        recipient_phone=phone_number,
+                        message_text="bot is back online! how can i help you?",
+                        access_token=access_token,
+                        phone_number_id=phone_number_id
+                    )
                 else:
                     logger.info(f"🙋 Skipping AI response for {phone_number} (human handoff active)")
                 return JSONResponse(content={"status": "ok"}, status_code=200)
@@ -674,23 +472,12 @@ async def handle_business_webhook(business_id: str, request: Request) -> JSONRes
             handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner', 'human agent']
             if any(trigger in message_body.lower() for trigger in handoff_triggers):
                 db.set_human_handoff(business_id, phone_number, True)
-                reply_text = "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏"
-                if is_instagram:
-                    ig_access_token = creds.get("instagram_access_token") or access_token
-                    ig_page_id = creds.get("instagram_page_id")
-                    await send_instagram_message(
-                        recipient_id=phone_number,
-                        message_text=reply_text,
-                        access_token=ig_access_token,
-                        page_id=ig_page_id
-                    )
-                else:
-                    await send_whatsapp_message(
-                        recipient_phone=phone_number,
-                        message_text=reply_text,
-                        access_token=access_token,
-                        phone_number_id=phone_number_id
-                    )
+                await send_whatsapp_message(
+                    recipient_phone=phone_number,
+                    message_text="no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏",
+                    access_token=access_token,
+                    phone_number_id=phone_number_id
+                )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
             # Process AI reply in background task
@@ -723,97 +510,58 @@ async def verify_webhook(
 @app.post("/webhook")
 async def handle_webhook(request: Request) -> JSONResponse:
     """
-    Legacy Global Webhook Handler Endpoint (POST) for WhatsApp and Instagram.
+    Legacy Global WhatsApp Webhook Handler Endpoint (POST).
     """
     try:
         body = await request.json()
         logger.info("📨 Received global webhook event")
+        message_data = extract_message_data(body)
         
-        is_instagram = (body.get("object") == "instagram")
-        if is_instagram:
-            message_data = extract_instagram_message_data(body)
-        else:
-            message_data = extract_message_data(body)
-            
         if message_data:
             phone_number, message_body, message_id, to_number = message_data
             
-            # Look up the business ID based on the Meta WhatsApp number or Instagram Page ID
-            if is_instagram:
-                business_id = db.get_business_id_by_instagram_page(to_number)
-            else:
-                business_id = db.get_business_id_by_phone(to_number)
-                
+            # Look up the business ID based on the Meta WhatsApp number
+            business_id = db.get_business_id_by_phone(to_number)
             if not business_id:
-                logger.warning(f"⚠️ No business found for ID/number {to_number}. Ignored.")
+                logger.warning(f"⚠️ No business found for number {to_number}. Ignored.")
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
             # Forward directly to the scoped webhook handler logic dynamically
             creds = db.get_business_credentials(business_id)
             access_token = creds.get("meta_access_token")
+            phone_number_id = creds.get("meta_phone_number_id")
             
-            sender_name = "Instagram User" if is_instagram else "Unknown"
             try:
-                if is_instagram:
-                    db.update_contact_name(business_id, phone_number, sender_name)
-                else:
-                    contacts = body["entry"][0]["changes"][0]["value"].get("contacts", [])
-                    if contacts:
-                        sender_name = contacts[0].get("profile", {}).get("name", "")
-                        if sender_name:
-                            db.update_contact_name(business_id, phone_number, sender_name)
+                contacts = body["entry"][0]["changes"][0]["value"].get("contacts", [])
+                if contacts:
+                    sender_name = contacts[0].get("profile", {}).get("name", "")
+                    if sender_name:
+                        db.update_contact_name(business_id, phone_number, sender_name)
             except (KeyError, IndexError):
                 pass
             
-            if is_instagram:
-                ig_access_token = creds.get("instagram_access_token") or access_token
-                ig_page_id = creds.get("instagram_page_id")
-                await mark_instagram_message_as_read(phone_number, ig_access_token, ig_page_id)
-            else:
-                phone_number_id = creds.get("meta_phone_number_id")
-                await mark_message_as_read(message_id, access_token, phone_number_id)
+            await mark_message_as_read(message_id, access_token, phone_number_id)
             
             if db.is_human_handoff(business_id, phone_number):
                 if message_body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
                     db.set_human_handoff(business_id, phone_number, False)
-                    if is_instagram:
-                        ig_access_token = creds.get("instagram_access_token") or access_token
-                        ig_page_id = creds.get("instagram_page_id")
-                        await send_instagram_message(
-                            recipient_id=phone_number,
-                            message_text="bot is back online! how can i help you?",
-                            access_token=ig_access_token,
-                            page_id=ig_page_id
-                        )
-                    else:
-                        await send_whatsapp_message(
-                            phone_number, 
-                            "bot is back online! how can i help you?",
-                            access_token,
-                            phone_number_id
-                        )
+                    await send_whatsapp_message(
+                        phone_number, 
+                        "bot is back online! how can i help you?",
+                        access_token,
+                        phone_number_id
+                    )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
             handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner', 'human agent']
             if any(trigger in message_body.lower() for trigger in handoff_triggers):
                 db.set_human_handoff(business_id, phone_number, True)
-                reply_text = "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏"
-                if is_instagram:
-                    ig_access_token = creds.get("instagram_access_token") or access_token
-                    ig_page_id = creds.get("instagram_page_id")
-                    await send_instagram_message(
-                        recipient_id=phone_number,
-                        message_text=reply_text,
-                        access_token=ig_access_token,
-                        page_id=ig_page_id
-                    )
-                else:
-                    await send_whatsapp_message(
-                        phone_number, 
-                        reply_text,
-                        access_token,
-                        phone_number_id
-                    )
+                await send_whatsapp_message(
+                    phone_number, 
+                    "no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience 🙏",
+                    access_token,
+                    phone_number_id
+                )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
             asyncio.create_task(_process_and_reply_meta(business_id, phone_number, message_body, sender_name))
@@ -834,10 +582,6 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
         creds = db.get_business_credentials(business_id)
         access_token = creds.get("meta_access_token")
         phone_number_id = creds.get("meta_phone_number_id")
-        
-        is_instagram = phone_number.startswith("instagram:")
-        ig_access_token = creds.get("instagram_access_token") or access_token
-        ig_page_id = creds.get("instagram_page_id")
         
         # Generate AI response using AI Engine (Multi-Tenant)
         ai_response = await ai_engine.generate_response(
@@ -885,20 +629,12 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
             
             # Send clean text response first
             if clean_response:
-                if is_instagram:
-                    await send_instagram_message(
-                        recipient_id=phone_number,
-                        message_text=clean_response,
-                        access_token=ig_access_token,
-                        page_id=ig_page_id
-                    )
-                else:
-                    await send_whatsapp_message(
-                        recipient_phone=phone_number,
-                        message_text=clean_response,
-                        access_token=access_token,
-                        phone_number_id=phone_number_id
-                    )
+                await send_whatsapp_message(
+                    recipient_phone=phone_number,
+                    message_text=clean_response,
+                    access_token=access_token,
+                    phone_number_id=phone_number_id
+                )
             
             # Send images for each token
             for prod_id in image_tokens:
@@ -929,30 +665,13 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
                     
                     for i, img_url in enumerate(images_to_send):
                         img_caption = f"{base_caption} (Photo {i+1}/{len(images_to_send)})" if len(images_to_send) > 1 else base_caption
-                        
-                        if is_instagram:
-                            # Send image first
-                            await send_instagram_image(
-                                recipient_id=phone_number,
-                                image_url=img_url,
-                                access_token=ig_access_token,
-                                page_id=ig_page_id
-                            )
-                            # Then send caption text
-                            await send_instagram_message(
-                                recipient_id=phone_number,
-                                message_text=img_caption,
-                                access_token=ig_access_token,
-                                page_id=ig_page_id
-                            )
-                        else:
-                            await send_whatsapp_image(
-                                recipient_phone=phone_number,
-                                image_url=img_url,
-                                caption=img_caption,
-                                access_token=access_token,
-                                phone_number_id=phone_number_id
-                            )
+                        await send_whatsapp_image(
+                            recipient_phone=phone_number,
+                            image_url=img_url,
+                            caption=img_caption,
+                            access_token=access_token,
+                            phone_number_id=phone_number_id
+                        )
                     logger.info(f"🖼️ Sent {len(images_to_send)} product image(s) for {prod_id} to {phone_number} via Meta")
             
         else:
@@ -1256,70 +975,49 @@ class ManualMessageRequest(BaseModel):
 
 @app.post("/chats/send")
 async def send_manual_message(req: ManualMessageRequest):
-    """Manually send a message to a WhatsApp or Instagram lead, logging it to database history."""
+    """Manually send a message to a WhatsApp lead, logging it to database history."""
     if not req.business_id or not req.phone_number or not req.message:
         raise HTTPException(status_code=400, detail="Missing required parameters")
         
     # 1. Log manual message to local database history
     db.save_message(req.business_id, req.phone_number, "model", req.message)
     
-    # 2. Check business Meta Graph API credentials
+    # 2. Check business WhatsApp Graph API credentials
     creds = db.get_business_credentials(req.business_id)
     access_token = creds.get("meta_access_token")
+    phone_number_id = creds.get("meta_phone_number_id")
     
     success = False
-    is_instagram = req.phone_number.startswith("instagram:")
     
-    if is_instagram:
-        # Send via Instagram
-        instagram_recipient = req.phone_number.split("instagram:")[1]
-        ig_access_token = creds.get("instagram_access_token") or access_token
-        ig_page_id = creds.get("instagram_page_id")
-        
-        if ig_access_token and ig_page_id:
-            try:
-                success = await send_instagram_message(
-                    recipient_id=instagram_recipient,
-                    message_text=req.message,
-                    access_token=ig_access_token,
-                    page_id=ig_page_id
-                )
-                if success:
-                    logger.info(f"✅ Manual message sent to Instagram user {instagram_recipient}")
-            except Exception as e:
-                logger.error(f"Failed to send manual message via Instagram: {e}")
-    else:
-        # Send via WhatsApp
-        phone_number_id = creds.get("meta_phone_number_id")
-        if access_token and phone_number_id:
-            try:
-                success = await send_whatsapp_message(
-                    recipient_phone=req.phone_number,
-                    message_text=req.message,
-                    access_token=access_token,
-                    phone_number_id=phone_number_id
-                )
-                if success:
-                    logger.info(f"✅ Manual message sent to {req.phone_number} via Meta Graph API")
-            except Exception as e:
-                logger.error(f"Failed to send manual message via Meta: {e}")
-                
-        # Fallback to Twilio sandbox if Meta credentials are not configured
-        if not success:
-            try:
-                await _send_twilio_message(req.phone_number, req.message)
-                success = True
-                logger.info(f"✅ Manual message sent to {req.phone_number} via Twilio sandbox fallback")
-            except Exception as e:
-                logger.error(f"Failed to send manual message via Twilio fallback: {e}")
-                
+    # Try sending via WhatsApp Meta API first if credentials exist
+    if access_token and phone_number_id:
+        try:
+            success = await send_whatsapp_message(
+                recipient_phone=req.phone_number,
+                message_text=req.message,
+                access_token=access_token,
+                phone_number_id=phone_number_id
+            )
+            if success:
+                logger.info(f"✅ Manual message sent to {req.phone_number} via Meta Graph API")
+        except Exception as e:
+            logger.error(f"Failed to send manual message via Meta: {e}")
+            
+    # Fallback to Twilio sandbox if Meta credentials are not configured
+    if not success:
+        try:
+            await _send_twilio_message(req.phone_number, req.message)
+            success = True
+            logger.info(f"✅ Manual message sent to {req.phone_number} via Twilio sandbox fallback")
+        except Exception as e:
+            logger.error(f"Failed to send manual message via Twilio fallback: {e}")
+            
     if success:
         return {"status": "success", "message": "Message sent and logged successfully"}
     else:
-        channel_name = "Instagram" if is_instagram else "WhatsApp"
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "message": f"Failed to deliver manual message via {channel_name}"}
+            content={"status": "error", "message": "Failed to deliver manual message via WhatsApp"}
         )
 
 
