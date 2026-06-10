@@ -967,6 +967,20 @@ async def get_daily_stats(business_id: str = Query(...)):
     return db.get_daily_analytics(business_id)
 
 
+class DemoChatRequest(BaseModel):
+    message: str
+    history: Optional[List[dict]] = []
+
+
+@app.post("/demo/chat")
+async def handle_demo_chat(req: DemoChatRequest):
+    """Handle public landing page demo chat using the AI Engine."""
+    if not req.message:
+        raise HTTPException(status_code=400, detail="Message is required")
+    reply = await ai_engine.generate_demo_response(req.message, req.history)
+    return {"reply": reply}
+
+
 class ManualMessageRequest(BaseModel):
     business_id: str
     phone_number: str

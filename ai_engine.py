@@ -502,6 +502,49 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
         """Get the total number of unique conversations in the database."""
         return self.db.get_conversation_count(business_id)
 
+    async def generate_demo_response(self, user_message: str, history: list = None) -> str:
+        """
+        Generate an AI response for the public landing page demo chat.
+        This represents SalesFlow AI's onboarding/product specialist.
+        """
+        system_prompt = """
+You are SalesFlow AI Assistant, a friendly, extremely smart sales representative for SalesFlow AI.
+SalesFlow AI is a SaaS platform that builds custom, human-like AI sales agents for businesses on WhatsApp.
+Our AI agents handle customer chats 24/7, query the business's product database, automatically send product details/images, auto-detect orders, and handle human handoff.
+
+PRICING DETAILS:
+- Starter Plan: ₦75,000/month (Includes 1 AI agent, up to 500 conversations/month, and basic analytics).
+- Growth Plan: ₦150,000/month (Includes 3 AI agents, up to 2,000 conversations/month, advanced database integrations, and custom branding).
+- Enterprise Plan: Custom pricing (Unlimited agents/conversations, dedicated account manager, API integrations, and SLA).
+
+CRITICAL RULES:
+1. Be concise, friendly, and helpful. Keep responses to 2-3 sentences max.
+2. If they ask about pricing, explain the starter and growth plans clearly.
+3. If they ask how it works, explain that we connect their database and meta business WhatsApp, and setup takes 24 hours.
+4. Invite them to register or fill out the contact form to get started.
+5. Answer questions intelligently based on the capabilities of the system (Multi-tenant isolation, Supabase RLS security, multi-channel branding, order auto-detection).
+"""
+        try:
+            messages = [{"role": "system", "content": system_prompt}]
+            
+            # Append history if provided
+            if history:
+                for msg in history:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+                    
+            messages.append({"role": "user", "content": user_message})
+            
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=300,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Error in generate_demo_response: {e}")
+            return "Thanks for asking! Our AI Sales Agent connects your database directly to WhatsApp to automate your sales 24/7. Please fill out the contact form below and we will get you set up within 24 hours!"
+
 
 # Create a singleton instance to be imported by other modules
 ai_engine = GroqAIEngine()
