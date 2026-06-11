@@ -280,7 +280,7 @@ class GroqAIEngine:
         
         logger.info("✅ Groq AI Engine initialized with persistent storage!")
     
-    def _build_custom_prompt(self, config: dict, business_id: str = None) -> str:
+    def _build_custom_prompt(self, config: dict, business_id: str = None, user_message: str = "") -> str:
         """
         Build a dynamic system prompt from the business's custom configuration.
         This is what powers the Custom Prompt Editor on the dashboard.
@@ -334,6 +334,77 @@ ABOUT THE BUSINESS: {description}
             db_products = self.db.get_available_products(business_id)
 
         if db_products:
+            # If there are many products, filter them based on keywords in user message / context to prevent 413 Payload Too Large / TPM limit exceeded.
+            if len(db_products) > 15:
+                search_text = user_message.lower()
+                
+                # Known locations in our catalog
+                locations_list = [
+                    "lagos", "abuja", "fct", "abia", "adamawa", "akwa ibom", "anambra", "bauchi", "bayelsa", 
+                    "benue", "borno", "cross river", "delta", "ebonyi", "edo", "ekiti", "enugu", "gombe", 
+                    "imo", "jigawa", "kaduna", "kano", "katsina", "kebbi", "kogi", "kwara", "nasarawa", 
+                    "niger", "ogun", "ondo", "osun", "oyo", "plateau", "rivers", "sokoto", "taraba", 
+                    "yobe", "zamfara", "ibadan", "lekki", "ikeja", "bodija"
+                ]
+
+                # Known categories
+                categories_list = [
+                    "duplex", "mansion", "bungalow", "commercial", "land", "apartment"
+                ]
+                
+                # Identify which locations and categories are mentioned in the query
+                matched_locations = [loc for loc in locations_list if loc in search_text]
+                matched_categories = [cat for cat in categories_list if cat in search_text]
+                
+                # Also extract general words of length > 3 for broad matching
+                words = [w.strip("?,.!:;()\"'") for w in search_text.split()]
+                general_keywords = [w for w in words if len(w) > 3 and w not in matched_locations and w not in matched_categories]
+                
+                scored_products = []
+                for p_item in db_products:
+                    p_name = p_item['name'].lower()
+                    p_desc = p_item.get('description', '').lower()
+                    p_cat = p_item.get('category', '').lower()
+                    p_text = f"{p_name} {p_desc} {p_cat}"
+                    
+                    score = 0
+                    
+                    # Location match (highest weight)
+                    for loc in matched_locations:
+                        if loc in p_text:
+                            score += 10
+                            
+                    # Category match (medium weight)
+                    for cat in matched_categories:
+                        if cat in p_text or cat in p_cat:
+                            score += 5
+                            
+                    # General word matches
+                    for kw in general_keywords:
+                        if kw in p_text:
+                            score += 1
+                            
+                    if score > 0:
+                        scored_products.append((p_item, score))
+                        
+                # Sort by score descending
+                scored_products.sort(key=lambda x: x[1], reverse=True)
+                
+                filtered = [item[0] for item in scored_products]
+                
+                # Fallback to default list if not enough matches are found
+                if len(filtered) < 5:
+                    for p_item in db_products[:15]:
+                        if p_item not in filtered:
+                            filtered.append(p_item)
+                            
+                db_products = filtered[:15]
+                
+                # Append a hint for the LLM that more products exist in other locations
+                prompt += f"""
+NOTE: We have 185 properties across all 36 states in Nigeria (plus FCT Abuja). A subset matching the customer's query is listed below. If they ask about a different state, tell them we have 5 properties in that state and ask what type of property they are interested in.
+"""
+
             # Build structured products prompt
             product_list_str = ""
             for p in db_products:
@@ -415,12 +486,21 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
         Build the messages list for the Groq API from conversation history.
         Uses custom prompt from database if configured, otherwise falls back to hardcoded prompts.
         """
+        # Load conversation history from database
+        history = self.db.get_conversation_history(business_id, phone_number)
+        
+        # Build search context for product filtering (combines current message and recent history)
+        history_text = ""
+        if history:
+            history_text = " ".join([msg["parts"][0] for msg in history if msg.get("parts")])
+        search_context = new_message + " " + history_text
+
         # First, try to load custom prompt config from the business settings
         business_config = self.db.get_business_config(business_id)
         
         if business_config:
             # Business has configured their custom prompt — use it
-            system_prompt = self._build_custom_prompt(business_config, business_id)
+            system_prompt = self._build_custom_prompt(business_config, business_id, search_context)
             logger.info(f"🎨 Using custom prompt for business: {business_config.get('name', 'Unknown')}")
         else:
             # Fallback to hardcoded prompts (legacy mode)
@@ -430,9 +510,6 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
             logger.info(f"📋 Using hardcoded {mode} prompt (no custom config found)")
         
         messages = [{"role": "system", "content": system_prompt}]
-        
-        # Load conversation history from database
-        history = self.db.get_conversation_history(business_id, phone_number)
         
         if history:
             logger.info(f"📂 Loaded {len(history)} messages from history for: {phone_number}")
