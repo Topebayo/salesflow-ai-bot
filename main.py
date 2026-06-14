@@ -24,6 +24,9 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.messaging_response import MessagingResponse
 from dotenv import load_dotenv
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from ai_engine import ai_engine
 from database import db
@@ -102,13 +105,35 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware to allow the dashboard to fetch data securely
+# =============================================================================
+# RATE LIMITING
+# =============================================================================
+# Protects API endpoints from brute force, scraping, and abuse.
+# Default: 60 requests/minute per IP. Sensitive endpoints have stricter limits.
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# =============================================================================
+# CORS — Restrict API access to our own frontend domains
+# =============================================================================
+# Only allow requests originating from our Vercel-hosted frontend
+# and the custom domain (once DNS is configured).
+ALLOWED_ORIGINS = [
+    "https://salesflow-ai-psi.vercel.app",
+    "https://salesaiflow.online",
+    "https://www.salesaiflow.online",
+    "http://localhost:3000",   # Local development
+    "http://localhost:5500",   # VS Code Live Server
+    "http://127.0.0.1:5500",  # VS Code Live Server (alt)
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
@@ -888,7 +913,8 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
 # =============================================================================
 
 @app.get("/")
-async def root():
+@limiter.limit("30/minute")
+async def root(request: Request):
     """Root endpoint - Health check and welcome message."""
     return {
         "status": "online",
@@ -904,14 +930,16 @@ class SettingsUpdate(BaseModel):
     business_id: Optional[str] = None
 
 @app.get("/settings")
-async def get_settings(business_id: Optional[str] = Query(None)):
+@limiter.limit("30/minute")
+async def get_settings(request: Request, business_id: Optional[str] = Query(None)):
     """Get the current bot mode and business settings."""
     if business_id:
         return db.get_business_config(business_id)
     return db.get_settings()
 
 @app.post("/settings")
-async def update_settings(settings: SettingsUpdate):
+@limiter.limit("10/minute")
+async def update_settings(request: Request, settings: SettingsUpdate):
     """Update the bot mode and business name."""
     if settings.business_id:
         # Update specific business bot mode
@@ -932,7 +960,8 @@ async def update_settings(settings: SettingsUpdate):
     return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to update settings"})
 
 @app.get("/health")
-async def health_check(business_id: Optional[str] = Query(None)):
+@limiter.limit("60/minute")
+async def health_check(request: Request, business_id: Optional[str] = Query(None)):
     """Health check endpoint for monitoring and load balancers."""
     return {
         "status": "healthy",
@@ -942,7 +971,8 @@ async def health_check(business_id: Optional[str] = Query(None)):
 
 
 @app.get("/stats")
-async def get_stats(business_id: Optional[str] = Query(None)):
+@limiter.limit("30/minute")
+async def get_stats(request: Request, business_id: Optional[str] = Query(None)):
     """Get comprehensive application statistics scoped to a business_id."""
     stats = db.get_stats(business_id)
     stats["active_conversations"] = ai_engine.get_conversation_count(business_id)
@@ -973,7 +1003,8 @@ class DemoChatRequest(BaseModel):
 
 
 @app.post("/demo/chat")
-async def handle_demo_chat(req: DemoChatRequest):
+@limiter.limit("10/minute")
+async def handle_demo_chat(request: Request, req: DemoChatRequest):
     """Handle public landing page demo chat using the AI Engine."""
     if not req.message:
         raise HTTPException(status_code=400, detail="Message is required")
@@ -988,7 +1019,8 @@ class ManualMessageRequest(BaseModel):
 
 
 @app.post("/chats/send")
-async def send_manual_message(req: ManualMessageRequest):
+@limiter.limit("20/minute")
+async def send_manual_message(request: Request, req: ManualMessageRequest):
     """Manually send a message to a WhatsApp lead, logging it to database history."""
     if not req.business_id or not req.phone_number or not req.message:
         raise HTTPException(status_code=400, detail="Missing required parameters")
@@ -1036,7 +1068,8 @@ async def send_manual_message(req: ManualMessageRequest):
 
 
 @app.get("/contacts")
-async def get_contacts(business_id: Optional[str] = Query(None)):
+@limiter.limit("30/minute")
+async def get_contacts(request: Request, business_id: Optional[str] = Query(None)):
     """Get all tracked contacts/leads scoped to a business_id."""
     return {
         "contacts": db.get_all_contacts(business_id),
@@ -1045,7 +1078,8 @@ async def get_contacts(business_id: Optional[str] = Query(None)):
 
 
 @app.get("/chats")
-async def get_chats(business_id: Optional[str] = Query(None), phone: str = None):
+@limiter.limit("30/minute")
+async def get_chats(request: Request, business_id: Optional[str] = Query(None), phone: str = None):
     """Get full chat messages scoped to a business_id."""
     if phone:
         history = db.get_conversation_history(business_id, phone, limit=100)
@@ -1075,15 +1109,16 @@ class BroadcastRequest(BaseModel):
     phones: Optional[list] = None
 
 @app.post("/broadcast")
-async def send_broadcast(request: BroadcastRequest):
+@limiter.limit("5/minute")
+async def send_broadcast(request: Request, body: BroadcastRequest):
     """Send a promotional/broadcast message to all or selected contacts scoped to a business."""
-    contacts = db.get_all_contacts(request.business_id)
+    contacts = db.get_all_contacts(body.business_id)
     
     # Filter if specific phones were provided
-    if request.phones is not None and len(request.phones) > 0:
-        contacts = [c for c in contacts if c["phone_number"] in request.phones]
+    if body.phones is not None and len(body.phones) > 0:
+        contacts = [c for c in contacts if c["phone_number"] in body.phones]
         
-    creds = db.get_business_credentials(request.business_id)
+    creds = db.get_business_credentials(body.business_id)
     access_token = creds.get("meta_access_token")
     phone_number_id = creds.get("meta_phone_number_id")
     
@@ -1096,7 +1131,7 @@ async def send_broadcast(request: BroadcastRequest):
             # Symmetrically try sending via Meta per-business credentials
             success = await send_whatsapp_message(
                 recipient_phone=phone,
-                message_text=request.message,
+                message_text=body.message,
                 access_token=access_token,
                 phone_number_id=phone_number_id
             )
@@ -1108,7 +1143,7 @@ async def send_broadcast(request: BroadcastRequest):
             logger.error(f"Failed to broadcast to {phone} via Meta API, falling back to Twilio: {str(e)}")
             try:
                 # Fallback to sandbox Twilio for testing
-                await _send_twilio_message(phone, request.message)
+                await _send_twilio_message(phone, body.message)
                 success_count += 1
             except Exception as t_err:
                 logger.error(f"Twilio broadcast fallback also failed for {phone}: {str(t_err)}")
@@ -1118,14 +1153,16 @@ async def send_broadcast(request: BroadcastRequest):
 
 
 @app.delete("/chats/{phone}/clear")
-async def clear_chat(phone: str, business_id: Optional[str] = Query(None)):
+@limiter.limit("10/minute")
+async def clear_chat(request: Request, phone: str, business_id: Optional[str] = Query(None)):
     """Clear conversation history for a specific phone number scoped to a business_id."""
     cleared = db.clear_conversation(business_id, phone)
     return {"cleared": cleared, "phone_number": phone}
 
 
 @app.get("/orders")
-async def get_orders(business_id: Optional[str] = Query(None)):
+@limiter.limit("30/minute")
+async def get_orders(request: Request, business_id: Optional[str] = Query(None)):
     """Get all orders scoped to a business_id."""
     return {
         "orders": db.get_all_orders(business_id),
@@ -1134,27 +1171,31 @@ async def get_orders(business_id: Optional[str] = Query(None)):
 
 
 @app.put("/orders/{order_id}/status")
-async def update_order(order_id: int, status: str = Query(...)):
+@limiter.limit("20/minute")
+async def update_order(request: Request, order_id: int, status: str = Query(...)):
     """Update order status. Valid: pending, paid, dispatched, delivered, cancelled"""
     updated = db.update_order_status(order_id, status)
     return {"updated": updated, "order_id": order_id, "new_status": status}
 
 
 @app.get("/handoffs")
-async def get_handoffs(business_id: Optional[str] = Query(None)):
+@limiter.limit("30/minute")
+async def get_handoffs(request: Request, business_id: Optional[str] = Query(None)):
     """Get all conversations waiting for human takeover scoped to a business_id."""
     return {"handoffs": db.get_handoff_contacts(business_id)}
 
 
 @app.post("/handoffs/{phone}/resume")
-async def resume_bot(phone: str, business_id: Optional[str] = Query(None)):
+@limiter.limit("20/minute")
+async def resume_bot(request: Request, phone: str, business_id: Optional[str] = Query(None)):
     """Resume AI bot for a conversation after human takeover scoped to a business_id."""
     db.set_human_handoff(business_id, phone, False)
     return {"resumed": True, "phone_number": phone}
 
 
 @app.post("/handoffs/{phone}/takeover")
-async def takeover_chat(phone: str, business_id: Optional[str] = Query(None)):
+@limiter.limit("20/minute")
+async def takeover_chat(request: Request, phone: str, business_id: Optional[str] = Query(None)):
     """Take over conversation manually (sets human_handoff = True) scoped to a business_id."""
     db.set_human_handoff(business_id, phone, True)
     return {"takeover": True, "phone_number": phone}
@@ -1182,14 +1223,16 @@ class ProductUpdate(BaseModel):
 
 
 @app.get("/products")
-async def get_products(business_id: str = Query(...)):
+@limiter.limit("30/minute")
+async def get_products(request: Request, business_id: str = Query(...)):
     """Get all products/property listings for a business."""
     products = db.get_products(business_id)
     return {"products": products, "total": len(products)}
 
 
 @app.post("/products")
-async def add_product(product: ProductCreate):
+@limiter.limit("20/minute")
+async def add_product(request: Request, product: ProductCreate):
     """Add a new product/property listing with optional image URL."""
     product_id = db.add_product(
         business_id=product.business_id,
@@ -1205,7 +1248,8 @@ async def add_product(product: ProductCreate):
 
 
 @app.put("/products/{product_id}")
-async def update_product(product_id: str, product: ProductUpdate):
+@limiter.limit("20/minute")
+async def update_product(request: Request, product_id: str, product: ProductUpdate):
     """Update an existing product/property listing."""
     update_data = product.dict(exclude_none=True)
     if not update_data:
@@ -1218,7 +1262,8 @@ async def update_product(product_id: str, product: ProductUpdate):
 
 
 @app.delete("/products/{product_id}")
-async def delete_product(product_id: str):
+@limiter.limit("10/minute")
+async def delete_product(request: Request, product_id: str):
     """Delete a product/property listing."""
     success = db.delete_product(product_id)
     if success:
@@ -1227,7 +1272,8 @@ async def delete_product(product_id: str):
 
 
 @app.put("/products/{product_id}/toggle")
-async def toggle_product_availability(product_id: str):
+@limiter.limit("20/minute")
+async def toggle_product_availability(request: Request, product_id: str):
     """Toggle a product's availability (show/hide from AI catalog)."""
     product = db.get_product_by_id(product_id)
     if not product:
@@ -1241,7 +1287,9 @@ async def toggle_product_availability(product_id: str):
 
 
 @app.post("/products/upload-image")
+@limiter.limit("10/minute")
 async def upload_product_image(
+    request: Request,
     business_id: str = Form(...),
     file: UploadFile = File(...)
 ):
