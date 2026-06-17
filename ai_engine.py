@@ -11,7 +11,7 @@ import os
 import logging
 from typing import Optional
 from dotenv import load_dotenv
-from groq import Groq
+from groq import AsyncGroq
 
 # Load environment variables
 load_dotenv()
@@ -270,8 +270,8 @@ class GroqAIEngine:
             logger.error("GROQ_API_KEY not found in environment variables!")
             raise ValueError("GROQ_API_KEY is required. Please set it in your .env file.")
         
-        # Initialize the Groq client
-        self.client = Groq(api_key=self.api_key)
+        # Initialize the Groq client as asynchronous
+        self.client = AsyncGroq(api_key=self.api_key)
         self.model_name = "llama-3.1-8b-instant"
         
         # Import database for persistent storage
@@ -548,8 +548,8 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
             # Build messages with history
             messages = self._build_messages(business_id, phone_number, user_message)
             
-            # Generate response using Groq
-            response = self.client.chat.completions.create(
+            # Generate response using AsyncGroq
+            response = await self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 temperature=0.7,
@@ -611,7 +611,7 @@ CRITICAL RULES:
                     
             messages.append({"role": "user", "content": user_message})
             
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
                 temperature=0.7,

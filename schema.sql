@@ -33,3 +33,7 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_conversations_phone ON conversations(phone_number);
 CREATE INDEX IF NOT EXISTS idx_conversations_timestamp ON conversations(timestamp);
 CREATE INDEX IF NOT EXISTS idx_orders_phone ON orders(phone_number);
+
+-- Multi-Tenant Indexes for scaling
+CREATE INDEX IF NOT EXISTS idx_contacts_business_id ON contacts(business_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_business_id ON conversations(business_id);
