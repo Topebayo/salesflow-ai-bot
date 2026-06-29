@@ -317,11 +317,12 @@ class Database:
     # =========================================================================
 
     def get_business_credentials(self, business_id: str) -> dict:
-        """Fetch a business's WhatsApp API credentials."""
+        """Fetch a business's WhatsApp API credentials (Meta or Evolution)."""
         if not self.client or not business_id: return {}
         try:
             res = self.client.table("businesses").select(
-                "meta_access_token, meta_phone_number_id, meta_verify_token, webhook_connected"
+                "meta_access_token, meta_phone_number_id, meta_verify_token, webhook_connected, "
+                "whatsapp_provider, evolution_instance_name, evolution_apikey"
             ).eq("id", business_id).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]
@@ -336,12 +337,40 @@ class Database:
             res = self.client.table("businesses").update({
                 "meta_access_token": access_token,
                 "meta_phone_number_id": phone_number_id,
-                "meta_verify_token": verify_token
+                "meta_verify_token": verify_token,
+                "whatsapp_provider": "meta"
             }).eq("id", business_id).execute()
             return len(res.data) > 0
         except Exception as e:
             logger.error(f"Error saving business credentials: {e}")
             return False
+
+    def save_evolution_credentials(self, business_id: str, instance_name: str, apikey: str) -> bool:
+        """Save Evolution API credentials for QR-code based WhatsApp connection."""
+        if not self.client or not business_id: return False
+        try:
+            res = self.client.table("businesses").update({
+                "whatsapp_provider": "evolution",
+                "evolution_instance_name": instance_name,
+                "evolution_apikey": apikey
+            }).eq("id", business_id).execute()
+            return len(res.data) > 0
+        except Exception as e:
+            logger.error(f"Error saving Evolution credentials: {e}")
+            return False
+
+    def get_business_by_evolution_instance(self, instance_name: str) -> dict:
+        """Find a business by its Evolution API instance name (for incoming webhook routing)."""
+        if not self.client or not instance_name: return {}
+        try:
+            res = self.client.table("businesses").select("id, name").eq(
+                "evolution_instance_name", instance_name
+            ).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+        except Exception as e:
+            logger.error(f"Error looking up business by evolution instance: {e}")
+        return {}
 
     def mark_webhook_verified(self, business_id: str) -> bool:
         """Mark a business's webhook as successfully verified."""

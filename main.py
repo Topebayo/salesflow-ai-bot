@@ -51,6 +51,10 @@ TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238
 # Meta Graph API endpoint for sending messages
 WHATSAPP_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 
+# Evolution API Configuration (QR Code WhatsApp Gateway)
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "").rstrip("/")
+EVOLUTION_API_GLOBAL_KEY = os.getenv("EVOLUTION_API_GLOBAL_KEY", "")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -1028,33 +1032,51 @@ async def send_manual_message(request: Request, req: ManualMessageRequest):
     # 1. Log manual message to local database history
     db.save_message(req.business_id, req.phone_number, "model", req.message)
     
-    # 2. Check business WhatsApp Graph API credentials
+    # 2. Check business WhatsApp provider and credentials
     creds = db.get_business_credentials(req.business_id)
-    access_token = creds.get("meta_access_token")
-    phone_number_id = creds.get("meta_phone_number_id")
+    provider = creds.get("whatsapp_provider", "meta")
     
     success = False
     
-    # Try sending via WhatsApp Meta API first if credentials exist
-    if access_token and phone_number_id:
-        try:
-            success = await send_whatsapp_message(
-                recipient_phone=req.phone_number,
-                message_text=req.message,
-                access_token=access_token,
-                phone_number_id=phone_number_id
-            )
-            if success:
-                logger.info(f"✅ Manual message sent to {req.phone_number} via Meta Graph API")
-        except Exception as e:
-            logger.error(f"Failed to send manual message via Meta: {e}")
+    # Route via Evolution API if provider is 'evolution'
+    if provider == "evolution":
+        instance_name = creds.get("evolution_instance_name")
+        apikey = creds.get("evolution_apikey")
+        if instance_name and apikey:
+            try:
+                success = await send_evolution_message(
+                    instance_name=instance_name,
+                    apikey=apikey,
+                    recipient_phone=req.phone_number,
+                    message_text=req.message
+                )
+                if success:
+                    logger.info(f"Manual message sent to {req.phone_number} via Evolution API")
+            except Exception as e:
+                logger.error(f"Failed to send manual message via Evolution: {e}")
+    else:
+        # Try sending via WhatsApp Meta API if credentials exist
+        access_token = creds.get("meta_access_token")
+        phone_number_id = creds.get("meta_phone_number_id")
+        if access_token and phone_number_id:
+            try:
+                success = await send_whatsapp_message(
+                    recipient_phone=req.phone_number,
+                    message_text=req.message,
+                    access_token=access_token,
+                    phone_number_id=phone_number_id
+                )
+                if success:
+                    logger.info(f"Manual message sent to {req.phone_number} via Meta Graph API")
+            except Exception as e:
+                logger.error(f"Failed to send manual message via Meta: {e}")
             
-    # Fallback to Twilio sandbox if Meta credentials are not configured
+    # Fallback to Twilio sandbox if nothing else worked
     if not success:
         try:
             await _send_twilio_message(req.phone_number, req.message)
             success = True
-            logger.info(f"✅ Manual message sent to {req.phone_number} via Twilio sandbox fallback")
+            logger.info(f"Manual message sent to {req.phone_number} via Twilio sandbox fallback")
         except Exception as e:
             logger.error(f"Failed to send manual message via Twilio fallback: {e}")
             
@@ -1327,6 +1349,434 @@ async def upload_product_image(
     except Exception as e:
         logger.error(f"❌ Secure image upload failed: {e}")
         return JSONResponse(status_code=500, content={"status": "error", "message": f"Upload failed: {str(e)}"})
+
+
+# =============================================================================
+# EVOLUTION API — QR CODE WHATSAPP GATEWAY
+# =============================================================================
+
+async def send_evolution_message(
+    instance_name: str,
+    apikey: str,
+    recipient_phone: str,
+    message_text: str
+) -> bool:
+    """
+    Send a WhatsApp message via Evolution API.
+    """
+    if not EVOLUTION_API_URL:
+        logger.error("EVOLUTION_API_URL is not configured!")
+        return False
+        
+    url = f"{EVOLUTION_API_URL}/message/sendText/{instance_name}"
+    headers = {
+        "apikey": apikey,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "number": recipient_phone,
+        "text": message_text
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code in (200, 201):
+                logger.info(f"Evolution message sent to {recipient_phone}")
+                return True
+            else:
+                logger.error(f"Evolution send failed. Status: {response.status_code}, Body: {response.text}")
+                return False
+    except Exception as e:
+        logger.error(f"Error sending Evolution message: {e}")
+        return False
+
+
+async def _process_and_reply_evolution(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
+    """Background task: generate AI response, then send via Evolution API."""
+    try:
+        # Simulate human typing delay
+        await asyncio.sleep(7)
+        
+        # Get business credentials
+        creds = db.get_business_credentials(business_id)
+        instance_name = creds.get("evolution_instance_name")
+        apikey = creds.get("evolution_apikey")
+        
+        if not instance_name or not apikey:
+            logger.error(f"Evolution credentials missing for business {business_id}")
+            return
+        
+        # Generate AI response
+        ai_response = await ai_engine.generate_response(
+            business_id=business_id,
+            phone_number=phone_number,
+            user_message=message_body
+        )
+        
+        if ai_response:
+            # Check for AI-triggered handoff
+            if "[HANDOFF_TRIGGERED]" in ai_response:
+                ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+                db.set_human_handoff(business_id, phone_number, True)
+                logger.info(f"AI triggered human handoff for {phone_number}")
+
+            # Dynamic Order Detection
+            business_config = db.get_business_config(business_id)
+            payment_info = business_config.get("payment_info", "")
+            payment_keywords = ["bank", "transfer", "opay", "account", "payment", "pay"]
+            if payment_info:
+                payment_keywords.extend([w.lower() for w in payment_info.split() if len(w) > 3])
+                
+            if any(keyword in ai_response.lower() for keyword in payment_keywords) and (
+                "account" in ai_response.lower() or "number" in ai_response.lower() or 
+                "pay" in ai_response.lower() or "transfer" in ai_response.lower()
+            ):
+                try:
+                    customer_name = sender_name if sender_name else "Unknown"
+                    db.save_order(
+                        business_id=business_id,
+                        phone_number=phone_number,
+                        customer_name=customer_name,
+                        items=message_body,
+                        total_amount=0,
+                        delivery_address=None
+                    )
+                    logger.info(f"Order auto-detected for {phone_number}")
+                except Exception as e:
+                    logger.error(f"Error saving order: {e}")
+
+            # Extract [IMAGE:product_id] tokens
+            image_tokens = re.findall(r'\[IMAGE:([a-zA-Z0-9\-]+)\]', ai_response)
+            clean_response = re.sub(r'\[IMAGE:[a-zA-Z0-9\-]+\]', '', ai_response).strip()
+            
+            # Send clean text response
+            if clean_response:
+                await send_evolution_message(
+                    instance_name=instance_name,
+                    apikey=apikey,
+                    recipient_phone=phone_number,
+                    message_text=clean_response
+                )
+            
+            # Send product images via Evolution API
+            for prod_id in image_tokens:
+                product = db.get_product_by_id(prod_id)
+                if product and product.get("image_url"):
+                    images_to_send = []
+                    raw_url = product["image_url"]
+                    if raw_url.startswith("[") and raw_url.endswith("]"):
+                        try:
+                            import json
+                            images_to_send = json.loads(raw_url)
+                        except Exception:
+                            images_to_send = [raw_url]
+                    else:
+                        images_to_send = [raw_url]
+                    
+                    images_to_send = [u for u in images_to_send if u]
+                    base_caption = f"{product['name']}"
+                    if product.get('price'):
+                        try:
+                            price_val = float(product['price'])
+                            base_caption += f" — N{price_val:,.0f}"
+                        except Exception:
+                            base_caption += f" — N{product['price']}"
+                    
+                    for img_url in images_to_send:
+                        # Send image via Evolution API
+                        img_payload = {
+                            "number": phone_number,
+                            "mediatype": "image",
+                            "media": img_url,
+                            "caption": base_caption
+                        }
+                        try:
+                            async with httpx.AsyncClient(timeout=30.0) as client:
+                                await client.post(
+                                    f"{EVOLUTION_API_URL}/message/sendMedia/{instance_name}",
+                                    headers={"apikey": apikey, "Content-Type": "application/json"},
+                                    json=img_payload
+                                )
+                        except Exception as img_e:
+                            logger.error(f"Error sending Evolution image: {img_e}")
+        else:
+            logger.error("AI engine returned empty response")
+            
+    except Exception as e:
+        logger.error(f"Background Evolution reply error: {e}")
+
+
+@app.post("/webhook/evolution/{business_id}")
+async def handle_evolution_webhook(business_id: str, request: Request) -> JSONResponse:
+    """
+    Webhook handler for incoming WhatsApp messages via Evolution API.
+    Evolution API sends a different JSON format than Meta's webhook.
+    """
+    try:
+        body = await request.json()
+        logger.info(f"Evolution webhook received for business {business_id}")
+        logger.debug(f"Evolution payload: {body}")
+        
+        # Evolution API event types: messages.upsert, connection.update, qrcode.updated, etc.
+        event = body.get("event", "")
+        
+        if event == "messages.upsert":
+            data = body.get("data", {})
+            
+            # Only process incoming messages (not outgoing ones)
+            key = data.get("key", {})
+            if key.get("fromMe", False):
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+            
+            # Extract message content
+            remote_jid = key.get("remoteJid", "")
+            # Convert WhatsApp JID (e.g., '2349012345678@s.whatsapp.net') to phone number
+            phone_number = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
+            
+            message_obj = data.get("message", {})
+            # Handle text messages
+            message_body = (
+                message_obj.get("conversation") or
+                message_obj.get("extendedTextMessage", {}).get("text") or
+                ""
+            )
+            
+            if not message_body:
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+            
+            sender_name = data.get("pushName", "")
+            logger.info(f"Evolution message from {phone_number}: {message_body[:50]}...")
+            
+            # Save contact name
+            if sender_name:
+                db.update_contact_name(business_id, phone_number, sender_name)
+            
+            # Ensure contact exists in database
+            db.save_message(business_id, phone_number, "user", message_body)
+            
+            # Check human handoff
+            if db.is_human_handoff(business_id, phone_number):
+                if message_body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
+                    db.set_human_handoff(business_id, phone_number, False)
+                    creds = db.get_business_credentials(business_id)
+                    await send_evolution_message(
+                        instance_name=creds.get("evolution_instance_name", ""),
+                        apikey=creds.get("evolution_apikey", ""),
+                        recipient_phone=phone_number,
+                        message_text="bot is back online! how can i help you?"
+                    )
+                else:
+                    logger.info(f"Skipping AI response for {phone_number} (human handoff active)")
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
+            # Check if customer wants a human
+            handoff_triggers = [
+                'talk to someone', 'speak to someone', 'talk to a human', 
+                'speak to a human', 'real person', 'i want a human', 
+                'talk to a person', 'speak to a person', 'customer service', 
+                'talk to owner', 'speak to owner', 'human agent'
+            ]
+            if any(trigger in message_body.lower() for trigger in handoff_triggers):
+                db.set_human_handoff(business_id, phone_number, True)
+                creds = db.get_business_credentials(business_id)
+                await send_evolution_message(
+                    instance_name=creds.get("evolution_instance_name", ""),
+                    apikey=creds.get("evolution_apikey", ""),
+                    recipient_phone=phone_number,
+                    message_text="no problem! i've notified the boss. someone will get back to you shortly. thanks for your patience"
+                )
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+            
+            # Process AI reply in background task
+            asyncio.create_task(_process_and_reply_evolution(
+                business_id, phone_number, message_body, sender_name
+            ))
+        
+        elif event == "connection.update":
+            state = body.get("data", {}).get("state", "")
+            logger.info(f"Evolution connection update for business {business_id}: {state}")
+            if state == "open":
+                # Mark webhook as connected in database
+                db.mark_webhook_verified(business_id)
+        
+        return JSONResponse(content={"status": "ok"}, status_code=200)
+        
+    except Exception as e:
+        logger.error(f"Error in Evolution webhook: {e}")
+        return JSONResponse(content={"status": "ok"}, status_code=200)
+
+
+@app.post("/evolution/create-instance/{business_id}")
+async def create_evolution_instance(business_id: str, request: Request) -> JSONResponse:
+    """
+    Create a new Evolution API instance for a business and return the QR code.
+    Called from the dashboard when a merchant clicks 'Connect via QR Scan'.
+    """
+    if not EVOLUTION_API_URL or not EVOLUTION_API_GLOBAL_KEY:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": "Evolution API is not configured on the server."}
+        )
+    
+    try:
+        # Generate a unique instance name based on business_id
+        instance_name = f"sf_{business_id[:8]}"
+        
+        # Build the webhook URL for this business
+        body_data = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        server_url = body_data.get("server_url", os.getenv("RENDER_EXTERNAL_URL", "https://api.salesaiflow.online"))
+        webhook_url = f"{server_url}/webhook/evolution/{business_id}"
+        
+        # Step 1: Create instance on Evolution API
+        create_url = f"{EVOLUTION_API_URL}/instance/create"
+        headers = {
+            "apikey": EVOLUTION_API_GLOBAL_KEY,
+            "Content-Type": "application/json"
+        }
+        create_payload = {
+            "instanceName": instance_name,
+            "integration": "WHATSAPP-BAILEYS",
+            "qrcode": True,
+            "webhook": {
+                "url": webhook_url,
+                "byEvents": False,
+                "base64": False,
+                "events": [
+                    "MESSAGES_UPSERT",
+                    "CONNECTION_UPDATE",
+                    "QRCODE_UPDATED"
+                ]
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(create_url, headers=headers, json=create_payload)
+            
+            if resp.status_code in (200, 201):
+                result = resp.json()
+                instance_apikey = result.get("hash", result.get("apikey", EVOLUTION_API_GLOBAL_KEY))
+                qr_code = result.get("qrcode", {}).get("base64", "")
+                
+                # Save credentials to database
+                db.save_evolution_credentials(business_id, instance_name, instance_apikey)
+                
+                return JSONResponse(content={
+                    "status": "success",
+                    "instance_name": instance_name,
+                    "qr_code": qr_code,
+                    "webhook_url": webhook_url
+                })
+            else:
+                logger.error(f"Evolution instance creation failed: {resp.status_code} — {resp.text}")
+                return JSONResponse(
+                    status_code=resp.status_code,
+                    content={"status": "error", "message": f"Evolution API error: {resp.text}"}
+                )
+                
+    except Exception as e:
+        logger.error(f"Error creating Evolution instance: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)}
+        )
+
+
+@app.get("/evolution/qrcode/{business_id}")
+async def get_evolution_qrcode(business_id: str, request: Request) -> JSONResponse:
+    """
+    Fetch the current QR code for a business's Evolution instance.
+    Used by the dashboard to refresh the QR image.
+    """
+    if not EVOLUTION_API_URL:
+        return JSONResponse(status_code=500, content={"status": "error", "message": "Evolution API not configured"})
+    
+    try:
+        creds = db.get_business_credentials(business_id)
+        instance_name = creds.get("evolution_instance_name")
+        apikey = creds.get("evolution_apikey", EVOLUTION_API_GLOBAL_KEY)
+        
+        if not instance_name:
+            return JSONResponse(status_code=404, content={"status": "error", "message": "No Evolution instance found for this business"})
+        
+        # Fetch connection state
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            state_resp = await client.get(
+                f"{EVOLUTION_API_URL}/instance/connectionState/{instance_name}",
+                headers={"apikey": apikey}
+            )
+            
+            if state_resp.status_code == 200:
+                state_data = state_resp.json()
+                connection_state = state_data.get("instance", {}).get("state", "close")
+                
+                if connection_state == "open":
+                    return JSONResponse(content={
+                        "status": "connected",
+                        "state": "open",
+                        "qr_code": ""
+                    })
+            
+            # If not connected, fetch QR code
+            qr_resp = await client.get(
+                f"{EVOLUTION_API_URL}/instance/connect/{instance_name}",
+                headers={"apikey": apikey}
+            )
+            
+            if qr_resp.status_code == 200:
+                qr_data = qr_resp.json()
+                qr_base64 = qr_data.get("base64", "")
+                return JSONResponse(content={
+                    "status": "waiting",
+                    "state": "connecting",
+                    "qr_code": qr_base64
+                })
+            else:
+                return JSONResponse(
+                    status_code=qr_resp.status_code,
+                    content={"status": "error", "message": qr_resp.text}
+                )
+                
+    except Exception as e:
+        logger.error(f"Error fetching Evolution QR code: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+@app.delete("/evolution/disconnect/{business_id}")
+async def disconnect_evolution_instance(business_id: str, request: Request) -> JSONResponse:
+    """
+    Disconnect and delete a business's Evolution instance.
+    """
+    if not EVOLUTION_API_URL:
+        return JSONResponse(status_code=500, content={"status": "error", "message": "Evolution API not configured"})
+    
+    try:
+        creds = db.get_business_credentials(business_id)
+        instance_name = creds.get("evolution_instance_name")
+        apikey = creds.get("evolution_apikey", EVOLUTION_API_GLOBAL_KEY)
+        
+        if not instance_name:
+            return JSONResponse(status_code=404, content={"status": "error", "message": "No instance found"})
+        
+        # Logout and delete instance
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            await client.delete(
+                f"{EVOLUTION_API_URL}/instance/logout/{instance_name}",
+                headers={"apikey": apikey}
+            )
+            await client.delete(
+                f"{EVOLUTION_API_URL}/instance/delete/{instance_name}",
+                headers={"apikey": apikey}
+            )
+        
+        # Clear credentials from database
+        db.save_evolution_credentials(business_id, "", "")
+        
+        return JSONResponse(content={"status": "success", "message": "Instance disconnected"})
+        
+    except Exception as e:
+        logger.error(f"Error disconnecting Evolution instance: {e}")
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
 # =============================================================================
