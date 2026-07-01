@@ -626,8 +626,8 @@ async def extract_order_details_via_llm(business_id: str, phone_number: str, las
         system_prompt = (
             "You are a precise data extractor. Analyze the WhatsApp conversation transcript between a Customer and an AI sales agent.\n"
             "Extract:\n"
-            "1. Ordered items: A concise, human-readable summary of products and quantities (e.g., '1x Hennessy VS, 2x Jameson').\n"
-            "2. Total amount: The final agreed total amount in Naira as an integer (e.g., 100000). If no clear total is agreed, calculate it based on the prices mentioned or set to 0. Do not include currency symbols or commas.\n"
+            "1. Ordered items: A concise, human-readable summary of products and quantities (e.g., '1x Jordan 4, 2x Premium Tee').\n"
+            "2. Total amount: The final agreed total amount in Naira as an integer (e.g., 125000). If no clear total is agreed, calculate it based on the prices mentioned or set to 0. Do not include currency symbols or commas.\n"
             "3. Delivery address: The physical address mentioned by the customer. If no address has been provided yet, output null.\n\n"
             "Return ONLY a valid JSON object matching this schema, without any markdown formatting, backticks, or extra text:\n"
             "{\n"
