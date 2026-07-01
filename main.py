@@ -483,6 +483,9 @@ async def handle_business_webhook(business_id: str, request: Request) -> JSONRes
             phone_number_id = creds.get("meta_phone_number_id")
             await mark_message_as_read(message_id, access_token, phone_number_id)
             
+            # Save user message to database immediately
+            db.save_message(business_id, phone_number, "user", message_body)
+            
             # Check human handoff
             if db.is_human_handoff(business_id, phone_number):
                 if message_body.strip().lower() in ['resume bot', 'resume ai', '/resume']:
@@ -601,6 +604,74 @@ async def handle_webhook(request: Request) -> JSONResponse:
         return JSONResponse(content={"status": "ok"}, status_code=200)
 
 
+async def extract_order_details_via_llm(business_id: str, phone_number: str, last_message: str) -> dict:
+    """
+    Query Groq to parse the order items, total amount, and delivery address
+    from the recent conversation history.
+    """
+    try:
+        # Get history (last 10 messages should be plenty for context)
+        history = db.get_conversation_history(business_id, phone_number, limit=10)
+        
+        transcript = ""
+        for msg in history:
+            role = "Customer" if msg["role"] == "user" else "AI Agent"
+            content = msg["parts"][0] if msg.get("parts") else ""
+            transcript += f"{role}: {content}\n"
+            
+        # Add the last user message just in case it wasn't saved yet
+        if last_message and last_message not in transcript:
+            transcript += f"Customer: {last_message}\n"
+            
+        system_prompt = (
+            "You are a precise data extractor. Analyze the WhatsApp conversation transcript between a Customer and an AI sales agent.\n"
+            "Extract:\n"
+            "1. Ordered items: A concise, human-readable summary of products and quantities (e.g., '1x Hennessy VS, 2x Jameson').\n"
+            "2. Total amount: The final agreed total amount in Naira as an integer (e.g., 100000). If no clear total is agreed, calculate it based on the prices mentioned or set to 0. Do not include currency symbols or commas.\n"
+            "3. Delivery address: The physical address mentioned by the customer. If no address has been provided yet, output null.\n\n"
+            "Return ONLY a valid JSON object matching this schema, without any markdown formatting, backticks, or extra text:\n"
+            "{\n"
+            '  "items": "description of ordered items",\n'
+            '  "total_amount": 100000,\n'
+            '  "delivery_address": "address or null"\n'
+            "}"
+        )
+        
+        response = await ai_engine.client.chat.completions.create(
+            model=ai_engine.model_name,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Transcript:\n{transcript}"}
+            ],
+            temperature=0.1,  # Low temperature for deterministic extraction
+            max_tokens=200,
+        )
+        
+        content = response.choices[0].message.content.strip()
+        
+        # Strip any markdown code block wrapper if the model returns it
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\n", "", content)
+            content = re.sub(r"\n```$", "", content)
+            
+        import json
+        data = json.loads(content)
+        
+        # Ensure correct types
+        return {
+            "items": str(data.get("items", last_message)),
+            "total_amount": int(data.get("total_amount", 0)),
+            "delivery_address": data.get("delivery_address") if data.get("delivery_address") else None
+        }
+    except Exception as e:
+        logger.error(f"Error extracting order details via LLM: {e}")
+        return {
+            "items": last_message,
+            "total_amount": 0,
+            "delivery_address": None
+        }
+
+
 async def _process_and_reply_meta(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
     """Background task: generate AI response, detect orders, then send via Meta Graph API."""
     try:
@@ -616,7 +687,8 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
         ai_response = await ai_engine.generate_response(
             business_id=business_id,
             phone_number=phone_number,
-            user_message=message_body
+            user_message=message_body,
+            save_user_message=False
         )
         
         if ai_response:
@@ -638,15 +710,16 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
             if any(keyword in ai_response.lower() for keyword in payment_keywords) and ("account" in ai_response.lower() or "number" in ai_response.lower() or "pay" in ai_response.lower() or "transfer" in ai_response.lower()):
                 try:
                     customer_name = sender_name if sender_name else "Unknown"
+                    order_details = await extract_order_details_via_llm(business_id, phone_number, message_body)
                     db.save_order(
                         business_id=business_id,
                         phone_number=phone_number,
                         customer_name=customer_name,
-                        items=message_body,
-                        total_amount=0,
-                        delivery_address=None
+                        items=order_details["items"],
+                        total_amount=order_details["total_amount"],
+                        delivery_address=order_details["delivery_address"]
                     )
-                    logger.info(f"📦 Order auto-detected for {phone_number}")
+                    logger.info(f"📦 Order auto-detected and extracted for {phone_number}: {order_details}")
                 except Exception as e:
                     logger.error(f"Error saving order: {e}")
 
@@ -764,6 +837,9 @@ async def handle_twilio_webhook(
     if ProfileName:
         db.update_contact_name(business_id, phone_number, ProfileName)
 
+    # Save user message to database immediately
+    db.save_message(business_id, phone_number, "user", Body)
+
     # Check if this conversation is in human handoff mode
     if db.is_human_handoff(business_id, phone_number):
         # Check if owner is resuming the bot
@@ -825,7 +901,8 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
         ai_response = await ai_engine.generate_response(
             business_id=business_id,
             phone_number=phone_number,
-            user_message=user_message
+            user_message=user_message,
+            save_user_message=False
         )
 
         if not ai_response:
@@ -850,16 +927,16 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
             # Try to extract order info from conversation
             try:
                 customer_name = profile_name or "Unknown"
-                # Save order with the AI response as items description
+                order_details = await extract_order_details_via_llm(business_id, phone_number, user_message)
                 db.save_order(
                     business_id=business_id,
                     phone_number=phone_number,
                     customer_name=customer_name,
-                    items=user_message,  # Customer's last message usually contains order
-                    total_amount=0,  # Will be updated manually
-                    delivery_address=None
+                    items=order_details["items"],
+                    total_amount=order_details["total_amount"],
+                    delivery_address=order_details["delivery_address"]
                 )
-                logger.info(f"📦 Order auto-detected for {phone_number}")
+                logger.info(f"📦 Order auto-detected and extracted for {phone_number}: {order_details}")
             except Exception as e:
                 logger.error(f"Error saving order: {e}")
 
@@ -1087,6 +1164,95 @@ async def send_manual_message(request: Request, req: ManualMessageRequest):
             status_code=500,
             content={"status": "error", "message": "Failed to deliver manual message via WhatsApp"}
         )
+
+
+class TriggerAIRequest(BaseModel):
+    business_id: str
+
+
+@app.post("/chats/{phone}/trigger-ai")
+@limiter.limit("20/minute")
+async def trigger_ai_response(phone: str, req: TriggerAIRequest, request: Request):
+    """
+    Manually trigger an AI response for a specific contact conversation.
+    Generates response immediately, saves it, sends it via WhatsApp, and returns it.
+    """
+    if not req.business_id or not phone:
+        raise HTTPException(status_code=400, detail="Missing required parameters")
+        
+    # Get last user message from conversation history
+    history = db.get_conversation_history(req.business_id, phone, limit=5)
+    user_messages = [msg["parts"][0] for msg in history if msg.get("role") == "user" and msg.get("parts")]
+    
+    if not user_messages:
+        raise HTTPException(status_code=400, detail="No user messages found in history to reply to")
+        
+    last_user_message = user_messages[-1]
+    
+    # Generate response via AI Engine immediately (passing save_user_message=False since it's already in history)
+    ai_response = await ai_engine.generate_response(
+        business_id=req.business_id,
+        phone_number=phone,
+        user_message=last_user_message,
+        save_user_message=False
+    )
+    
+    if not ai_response:
+        raise HTTPException(status_code=500, detail="AI engine failed to generate response")
+        
+    # Check for AI-triggered handoff
+    if "[HANDOFF_TRIGGERED]" in ai_response:
+        ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+        db.set_human_handoff(req.business_id, phone, True)
+        logger.info(f"🙋 AI triggered human handoff during manual trigger for {phone}")
+        
+    # Send the response via WhatsApp
+    creds = db.get_business_credentials(req.business_id)
+    provider = creds.get("whatsapp_provider", "meta")
+    
+    success = False
+    
+    if provider == "evolution":
+        instance_name = creds.get("evolution_instance_name")
+        apikey = creds.get("evolution_apikey")
+        if instance_name and apikey:
+            try:
+                success = await send_evolution_message(
+                    instance_name=instance_name,
+                    apikey=apikey,
+                    recipient_phone=phone,
+                    message_text=ai_response
+                )
+            except Exception as e:
+                logger.error(f"Failed to send manually triggered AI response via Evolution: {e}")
+    else:
+        access_token = creds.get("meta_access_token")
+        phone_number_id = creds.get("meta_phone_number_id")
+        if access_token and phone_number_id:
+            try:
+                success = await send_whatsapp_message(
+                    recipient_phone=phone,
+                    message_text=ai_response,
+                    access_token=access_token,
+                    phone_number_id=phone_number_id
+                )
+            except Exception as e:
+                logger.error(f"Failed to send manually triggered AI response via Meta: {e}")
+                
+    # Fallback to Twilio sandbox if nothing else worked
+    if not success:
+        try:
+            await _send_twilio_message(phone, ai_response)
+            success = True
+        except Exception as e:
+            logger.error(f"Failed to send manually triggered AI response via Twilio fallback: {e}")
+            
+    # Note: ai_engine.generate_response already saved the AI response (role: model) to the db!
+    
+    if success:
+        return {"status": "success", "reply": ai_response}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to deliver AI response via WhatsApp")
 
 
 @app.get("/contacts")
@@ -1411,7 +1577,8 @@ async def _process_and_reply_evolution(business_id: str, phone_number: str, mess
         ai_response = await ai_engine.generate_response(
             business_id=business_id,
             phone_number=phone_number,
-            user_message=message_body
+            user_message=message_body,
+            save_user_message=False
         )
         
         if ai_response:
@@ -1434,15 +1601,16 @@ async def _process_and_reply_evolution(business_id: str, phone_number: str, mess
             ):
                 try:
                     customer_name = sender_name if sender_name else "Unknown"
+                    order_details = await extract_order_details_via_llm(business_id, phone_number, message_body)
                     db.save_order(
                         business_id=business_id,
                         phone_number=phone_number,
                         customer_name=customer_name,
-                        items=message_body,
-                        total_amount=0,
-                        delivery_address=None
+                        items=order_details["items"],
+                        total_amount=order_details["total_amount"],
+                        delivery_address=order_details["delivery_address"]
                     )
-                    logger.info(f"Order auto-detected for {phone_number}")
+                    logger.info(f"📦 Order auto-detected and extracted for {phone_number}: {order_details}")
                 except Exception as e:
                     logger.error(f"Error saving order: {e}")
 

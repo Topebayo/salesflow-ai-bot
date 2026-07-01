@@ -533,7 +533,8 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
         self,
         business_id: str,
         phone_number: str,
-        user_message: str
+        user_message: str,
+        save_user_message: bool = True
     ) -> Optional[str]:
         """
         Generate an AI response for a user message.
@@ -542,8 +543,9 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
         try:
             logger.info(f"💬 Generating response for {phone_number}: {user_message[:50]}...")
             
-            # Save the user's message to database
-            self.db.save_message(business_id, phone_number, "user", user_message)
+            # Save the user's message to database if requested
+            if save_user_message:
+                self.db.save_message(business_id, phone_number, "user", user_message)
             
             # Build messages with history
             messages = self._build_messages(business_id, phone_number, user_message)
