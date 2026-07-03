@@ -488,42 +488,57 @@ async def handle_business_webhook(business_id: str, request: Request) -> JSONRes
             
             # Check human handoff
             if db.is_human_handoff(business_id, phone_number):
-                if message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
-                    db.set_human_handoff(business_id, phone_number, False)
-                    await send_whatsapp_message(
-                        recipient_phone=phone_number,
-                        message_text="🤖 Bot is back online! How can I help you today?",
-                        access_token=access_token,
-                        phone_number_id=phone_number_id
-                    )
-                elif message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
-                    await send_whatsapp_message(
-                        recipient_phone=phone_number,
-                        message_text="🙋 Bot is already paused (Human handoff active). Send /handon when you are ready to resume the AI!",
-                        access_token=access_token,
-                        phone_number_id=phone_number_id
-                    )
+                if message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start', '/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
+                    if not db.is_business_admin(business_id, phone_number):
+                        await send_whatsapp_message(
+                            recipient_phone=phone_number,
+                            message_text="⚠️ Unauthorized: Only the registered business owner can perform administrative bot commands.",
+                            access_token=access_token,
+                            phone_number_id=phone_number_id
+                        )
+                    elif message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
+                        db.set_human_handoff(business_id, phone_number, False)
+                        await send_whatsapp_message(
+                            recipient_phone=phone_number,
+                            message_text="🤖 Bot is back online! How can I help you today?",
+                            access_token=access_token,
+                            phone_number_id=phone_number_id
+                        )
+                    else:
+                        await send_whatsapp_message(
+                            recipient_phone=phone_number,
+                            message_text="🙋 Bot is already paused (Human handoff active). Send /handon when you are ready to resume the AI!",
+                            access_token=access_token,
+                            phone_number_id=phone_number_id
+                        )
                 else:
                     logger.info(f"🙋 Skipping AI response for {phone_number} (human handoff active)")
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
             # Check explicit slash commands for handoff / resume
-            if message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
-                db.set_human_handoff(business_id, phone_number, True)
-                await send_whatsapp_message(
-                    recipient_phone=phone_number,
-                    message_text="🙋 Human handoff active. AI is now paused for this chat. Send /handon to resume.",
-                    access_token=access_token,
-                    phone_number_id=phone_number_id
-                )
-                return JSONResponse(content={"status": "ok"}, status_code=200)
-            elif message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
-                await send_whatsapp_message(
-                    recipient_phone=phone_number,
-                    message_text="🤖 Bot is already active and listening 24/7!",
-                    access_token=access_token,
-                    phone_number_id=phone_number_id
-                )
+            if message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop', '/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
+                if not db.is_business_admin(business_id, phone_number):
+                    await send_whatsapp_message(
+                        recipient_phone=phone_number,
+                        message_text="⚠️ Unauthorized: Only the registered business owner can perform administrative bot commands.",
+                        access_token=access_token,
+                        phone_number_id=phone_number_id
+                    )
+                elif message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
+                    db.set_human_handoff(business_id, phone_number, True)
+                    await send_whatsapp_message(
+                        recipient_phone=phone_number,
+                        message_text="🙋 Human handoff active. AI is now paused for this chat. Send /handon to resume.",
+                        access_token=access_token,
+                        phone_number_id=phone_number_id
+                    )
+                else:
+                    await send_whatsapp_message(
+                        recipient_phone=phone_number,
+                        message_text="🤖 Bot is already active and listening 24/7!",
+                        access_token=access_token,
+                        phone_number_id=phone_number_id
+                    )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
             # Check if customer wants a human
@@ -601,39 +616,54 @@ async def handle_webhook(request: Request) -> JSONResponse:
             await mark_message_as_read(message_id, access_token, phone_number_id)
             
             if db.is_human_handoff(business_id, phone_number):
-                if message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
-                    db.set_human_handoff(business_id, phone_number, False)
+                if message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start', '/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
+                    if not db.is_business_admin(business_id, phone_number):
+                        await send_whatsapp_message(
+                            phone_number, 
+                            "⚠️ Unauthorized: Only the registered business owner can perform administrative bot commands.",
+                            access_token,
+                            phone_number_id
+                        )
+                    elif message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
+                        db.set_human_handoff(business_id, phone_number, False)
+                        await send_whatsapp_message(
+                            phone_number, 
+                            "🤖 Bot is back online! How can I help you today?",
+                            access_token,
+                            phone_number_id
+                        )
+                    else:
+                        await send_whatsapp_message(
+                            phone_number, 
+                            "🙋 Bot is already paused (Human handoff active). Send /handon when you are ready to resume the AI!",
+                            access_token,
+                            phone_number_id
+                        )
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
+            if message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop', '/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
+                if not db.is_business_admin(business_id, phone_number):
                     await send_whatsapp_message(
                         phone_number, 
-                        "🤖 Bot is back online! How can I help you today?",
+                        "⚠️ Unauthorized: Only the registered business owner can perform administrative bot commands.",
                         access_token,
                         phone_number_id
                     )
                 elif message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
+                    db.set_human_handoff(business_id, phone_number, True)
                     await send_whatsapp_message(
                         phone_number, 
-                        "🙋 Bot is already paused (Human handoff active). Send /handon when you are ready to resume the AI!",
+                        "🙋 Human handoff active. AI is now paused for this chat. Send /handon to resume.",
                         access_token,
                         phone_number_id
                     )
-                return JSONResponse(content={"status": "ok"}, status_code=200)
-
-            if message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
-                db.set_human_handoff(business_id, phone_number, True)
-                await send_whatsapp_message(
-                    phone_number, 
-                    "🙋 Human handoff active. AI is now paused for this chat. Send /handon to resume.",
-                    access_token,
-                    phone_number_id
-                )
-                return JSONResponse(content={"status": "ok"}, status_code=200)
-            elif message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
-                await send_whatsapp_message(
-                    phone_number, 
-                    "🤖 Bot is already active and listening 24/7!",
-                    access_token,
-                    phone_number_id
-                )
+                else:
+                    await send_whatsapp_message(
+                        phone_number, 
+                        "🤖 Bot is already active and listening 24/7!",
+                        access_token,
+                        phone_number_id
+                    )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
             handoff_triggers = ['talk to someone', 'speak to someone', 'talk to a human', 'speak to a human', 'real person', 'i want a human', 'talk to a person', 'speak to a person', 'customer service', 'talk to owner', 'speak to owner', 'human agent']
@@ -894,11 +924,14 @@ async def handle_twilio_webhook(
     # Check if this conversation is in human handoff mode
     if db.is_human_handoff(business_id, phone_number):
         # Check if owner is resuming the bot
-        if Body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
-            db.set_human_handoff(business_id, phone_number, False)
-            await _send_twilio_message(phone_number, "🤖 Bot is back online! How can I help you today?")
-        elif Body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
-            await _send_twilio_message(phone_number, "🙋 Bot is already paused (Human handoff active). Send /handon when you are ready to resume the AI!")
+        if Body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start', '/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
+            if not db.is_business_admin(business_id, phone_number):
+                await _send_twilio_message(phone_number, "⚠️ Unauthorized: Only the registered business owner can perform administrative bot commands.")
+            elif Body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
+                db.set_human_handoff(business_id, phone_number, False)
+                await _send_twilio_message(phone_number, "🤖 Bot is back online! How can I help you today?")
+            else:
+                await _send_twilio_message(phone_number, "🙋 Bot is already paused (Human handoff active). Send /handon when you are ready to resume the AI!")
         else:
             # Don't respond — human is handling this
             logger.info(f"🙋 Skipping AI response for {phone_number} (human handoff active)")
@@ -906,13 +939,14 @@ async def handle_twilio_webhook(
         return PlainTextResponse(str(resp), media_type="application/xml")
 
     # Check explicit slash commands for handoff / resume
-    if Body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
-        db.set_human_handoff(business_id, phone_number, True)
-        await _send_twilio_message(phone_number, "🙋 Human handoff active. AI is now paused for this chat. Send /handon to resume.")
-        resp = MessagingResponse()
-        return PlainTextResponse(str(resp), media_type="application/xml")
-    elif Body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
-        await _send_twilio_message(phone_number, "🤖 Bot is already active and listening 24/7!")
+    if Body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop', '/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
+        if not db.is_business_admin(business_id, phone_number):
+            await _send_twilio_message(phone_number, "⚠️ Unauthorized: Only the registered business owner can perform administrative bot commands.")
+        elif Body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
+            db.set_human_handoff(business_id, phone_number, True)
+            await _send_twilio_message(phone_number, "🙋 Human handoff active. AI is now paused for this chat. Send /handon to resume.")
+        else:
+            await _send_twilio_message(phone_number, "🤖 Bot is already active and listening 24/7!")
         resp = MessagingResponse()
         return PlainTextResponse(str(resp), media_type="application/xml")
 
@@ -1789,46 +1823,59 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
             
             # Check human handoff
             if db.is_human_handoff(business_id, phone_number):
-                if message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
-                    db.set_human_handoff(business_id, phone_number, False)
+                if message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start', '/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
                     creds = db.get_business_credentials(business_id)
-                    await send_evolution_message(
-                        instance_name=creds.get("evolution_instance_name", ""),
-                        apikey=creds.get("evolution_apikey", ""),
-                        recipient_phone=phone_number,
-                        message_text="🤖 Bot is back online! How can I help you today?"
-                    )
-                elif message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
-                    creds = db.get_business_credentials(business_id)
-                    await send_evolution_message(
-                        instance_name=creds.get("evolution_instance_name", ""),
-                        apikey=creds.get("evolution_apikey", ""),
-                        recipient_phone=phone_number,
-                        message_text="🙋 Bot is already paused (Human handoff active). Send /handon when you are ready to resume the AI!"
-                    )
+                    if not db.is_business_admin(business_id, phone_number):
+                        await send_evolution_message(
+                            instance_name=creds.get("evolution_instance_name", ""),
+                            apikey=creds.get("evolution_apikey", ""),
+                            recipient_phone=phone_number,
+                            message_text="⚠️ Unauthorized: Only the registered business owner can perform administrative bot commands."
+                        )
+                    elif message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
+                        db.set_human_handoff(business_id, phone_number, False)
+                        await send_evolution_message(
+                            instance_name=creds.get("evolution_instance_name", ""),
+                            apikey=creds.get("evolution_apikey", ""),
+                            recipient_phone=phone_number,
+                            message_text="🤖 Bot is back online! How can I help you today?"
+                        )
+                    else:
+                        await send_evolution_message(
+                            instance_name=creds.get("evolution_instance_name", ""),
+                            apikey=creds.get("evolution_apikey", ""),
+                            recipient_phone=phone_number,
+                            message_text="🙋 Bot is already paused (Human handoff active). Send /handon when you are ready to resume the AI!"
+                        )
                 else:
                     logger.info(f"Skipping AI response for {phone_number} (human handoff active)")
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
             # Check explicit slash commands for handoff / resume
-            if message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
-                db.set_human_handoff(business_id, phone_number, True)
+            if message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop', '/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
                 creds = db.get_business_credentials(business_id)
-                await send_evolution_message(
-                    instance_name=creds.get("evolution_instance_name", ""),
-                    apikey=creds.get("evolution_apikey", ""),
-                    recipient_phone=phone_number,
-                    message_text="🙋 Human handoff active. AI is now paused for this chat. Send /handon to resume."
-                )
-                return JSONResponse(content={"status": "ok"}, status_code=200)
-            elif message_body.strip().lower() in ['/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
-                creds = db.get_business_credentials(business_id)
-                await send_evolution_message(
-                    instance_name=creds.get("evolution_instance_name", ""),
-                    apikey=creds.get("evolution_apikey", ""),
-                    recipient_phone=phone_number,
-                    message_text="🤖 Bot is already active and listening 24/7!"
-                )
+                if not db.is_business_admin(business_id, phone_number):
+                    await send_evolution_message(
+                        instance_name=creds.get("evolution_instance_name", ""),
+                        apikey=creds.get("evolution_apikey", ""),
+                        recipient_phone=phone_number,
+                        message_text="⚠️ Unauthorized: Only the registered business owner can perform administrative bot commands."
+                    )
+                elif message_body.strip().lower() in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
+                    db.set_human_handoff(business_id, phone_number, True)
+                    await send_evolution_message(
+                        instance_name=creds.get("evolution_instance_name", ""),
+                        apikey=creds.get("evolution_apikey", ""),
+                        recipient_phone=phone_number,
+                        message_text="🙋 Human handoff active. AI is now paused for this chat. Send /handon to resume."
+                    )
+                else:
+                    await send_evolution_message(
+                        instance_name=creds.get("evolution_instance_name", ""),
+                        apikey=creds.get("evolution_apikey", ""),
+                        recipient_phone=phone_number,
+                        message_text="🤖 Bot is already active and listening 24/7!"
+                    )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
             # Check if customer wants a human

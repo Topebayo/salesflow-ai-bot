@@ -10,6 +10,7 @@ SaaS Multi-Tenant: All queries are scoped to business_id for data isolation.
 """
 
 import os
+import re
 import logging
 from datetime import datetime
 from supabase import create_client, Client
@@ -268,6 +269,22 @@ class Database:
             return bool(res.data[0].get("human_handoff", False))
         return False
 
+    def is_business_admin(self, business_id: str, phone_number: str) -> bool:
+        """Check if sender phone matches registered admin_phone or whatsapp_number."""
+        if not self.client or not business_id or not phone_number: return False
+        try:
+            res = self.client.table("businesses").select("admin_phone, whatsapp_number").eq("id", business_id).execute()
+            if res.data and len(res.data) > 0:
+                b = res.data[0]
+                admin_phone = re.sub(r'\D', '', str(b.get("admin_phone") or ""))
+                biz_phone = re.sub(r'\D', '', str(b.get("whatsapp_number") or ""))
+                sender_clean = re.sub(r'\D', '', str(phone_number))
+                if sender_clean and ((admin_phone and sender_clean == admin_phone) or (biz_phone and sender_clean == biz_phone)):
+                    return True
+        except Exception as e:
+            logger.error(f"Error checking business admin: {e}")
+        return False
+
     def get_handoff_contacts(self, business_id: str = None) -> list:
         if not self.client: return []
         query = self.client.table("contacts").select("*").eq("human_handoff", True).order("last_seen", desc=True)
@@ -304,7 +321,7 @@ class Database:
         try:
             res = self.client.table("businesses").select(
                 "name, bot_mode, agent_name, greeting, business_description, "
-                "products_services, payment_info, business_hours, custom_rules, tone, inspection_fee"
+                "products_services, payment_info, business_hours, custom_rules, tone, inspection_fee, admin_phone"
             ).eq("id", business_id).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]
