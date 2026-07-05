@@ -1794,7 +1794,7 @@ async def delete_evolution_message(
     payload = {
         "remoteJid": remote_jid,
         "fromMe": True,
-        "messageId": message_id
+        "id": message_id
     }
     
     try:
