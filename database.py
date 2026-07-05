@@ -269,6 +269,33 @@ class Database:
             return bool(res.data[0].get("human_handoff", False))
         return False
 
+    def qualify_lead(self, business_id: str, phone_number: str, budget_min: str = "", budget_max: str = "", preferred_location: str = "", search_status: str = "searching") -> bool:
+        """Update a contact's real estate qualification info."""
+        if not self.client or not business_id or not phone_number: return False
+        try:
+            # Check if contact exists
+            contact_res = self.client.table("contacts").select("id").eq("phone_number", phone_number).eq("business_id", business_id).execute()
+            
+            update_data = {}
+            if budget_min: update_data["budget_min"] = budget_min
+            if budget_max: update_data["budget_max"] = budget_max
+            if preferred_location: update_data["preferred_location"] = preferred_location
+            if search_status: update_data["search_status"] = search_status
+            
+            if not update_data: return True
+            
+            if len(contact_res.data) > 0:
+                self.client.table("contacts").update(update_data).eq("phone_number", phone_number).eq("business_id", business_id).execute()
+            else:
+                update_data["business_id"] = business_id
+                update_data["phone_number"] = phone_number
+                update_data["message_count"] = 0
+                self.client.table("contacts").insert(update_data).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error qualifying lead: {e}")
+            return False
+
     def is_business_admin(self, business_id: str, phone_number: str) -> bool:
         """Check if sender phone matches registered admin_phone or whatsapp_number."""
         if not self.client or not business_id or not phone_number: return False
@@ -427,7 +454,7 @@ class Database:
             logger.error(f"Error fetching product: {e}")
         return {}
 
-    def add_product(self, business_id: str, name: str, description: str = "", price: str = "", image_url: str = "", category: str = "") -> str:
+    def add_product(self, business_id: str, name: str, description: str = "", price: str = "", image_url: str = "", category: str = "", bedrooms: int = 0, bathrooms: int = 0, property_type: str = "", location: str = "", virtual_tour_url: str = "") -> str:
         """Add a product to the catalog. Returns the product ID."""
         if not self.client or not business_id: return ""
         try:
@@ -437,7 +464,12 @@ class Database:
                 "description": description,
                 "price": price,
                 "image_url": image_url,
-                "category": category
+                "category": category,
+                "bedrooms": bedrooms,
+                "bathrooms": bathrooms,
+                "property_type": property_type,
+                "location": location,
+                "virtual_tour_url": virtual_tour_url
             }).execute()
             product_id = res.data[0].get("id", "") if res.data else ""
             logger.info(f"📦 Product '{name}' added for business {business_id}")
@@ -535,7 +567,7 @@ class Database:
         if not self.client or not business_id: return []
         try:
             res = self.client.table("products").select(
-                "id, name, description, price, image_url, category"
+                "id, name, description, price, image_url, category, bedrooms, bathrooms, property_type, location, virtual_tour_url"
             ).eq("business_id", business_id).eq("is_available", True).execute()
             return res.data
         except Exception as e:

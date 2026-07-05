@@ -268,6 +268,22 @@ CRITICAL RULES:
 5. Never misspell or alter payment gateway names. Always write OPay as 'OPay' (never write it as 'Ola pay' or similar).
 """
 
+        if bot_mode == "real_estate":
+            prompt += """
+REAL ESTATE QUALIFICATION FLOW:
+1. When chatting with a new customer, dynamically qualify their needs by asking for:
+   - Their budget range (e.g. 50 Million, 100M, etc.)
+   - Their preferred location or neighborhood
+2. Ask about their budget or location naturally and conversationally. Do not sound like a robot.
+3. When the customer tells you their budget or preferred location (or both), you MUST append a hidden qualification tag at the very end of your response using this exact format:
+   [QUALIFY: budget=MIN-MAX, location=NAME]
+   Examples:
+   - If they say: "I have 50 million to 60 million and want to buy in Lekki", append: [QUALIFY: budget=50M-60M, location=Lekki]
+   - If they only state location: "I want a flat in Ikeja", append: [QUALIFY: budget=, location=Ikeja]
+   - If they only state budget: "My budget is 80 Million", append: [QUALIFY: budget=80M-80M, location=]
+   Always keep the values simple (e.g., use 'M' for Millions). Ensure you include the brackets [ ] and the exact 'QUALIFY' keyword. This tag is hidden from the customer but helps update the agent dashboard.
+"""
+
         if greeting:
             prompt += f"""
 GREETING: When a customer says "hi", "hello", or starts a new conversation, reply with something like: "{greeting}"
@@ -364,7 +380,20 @@ NOTE: We have 185 properties across all 36 states in Nigeria (plus FCT Abuja). A
                 except Exception:
                     price_str = f" ₦{p.get('price')}"
                 category_str = f" [{p['category']}]" if p.get('category') else ""
-                desc_str = f" - {p['description']}" if p.get('description') else ""
+                
+                # Check for property specs in Real Estate mode
+                if bot_mode == "real_estate":
+                    specs = []
+                    if p.get('property_type'): specs.append(f"Type: {p['property_type']}")
+                    if p.get('bedrooms'): specs.append(f"{p['bedrooms']} Beds")
+                    if p.get('bathrooms'): specs.append(f"{p['bathrooms']} Baths")
+                    if p.get('location'): specs.append(f"Location: {p['location']}")
+                    if p.get('virtual_tour_url'): specs.append(f"Virtual Tour: {p['virtual_tour_url']}")
+                    specs_str = f" ({', '.join(specs)})" if specs else ""
+                    desc_str = f" - {p.get('description', '')}{specs_str}"
+                else:
+                    desc_str = f" - {p.get('description', '')}"
+                    
                 product_list_str += f"- ID: {p['id']} | {p['name']}{price_str}{category_str}{desc_str}\n"
 
             prompt += f"""

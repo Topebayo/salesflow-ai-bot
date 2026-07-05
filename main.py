@@ -685,6 +685,46 @@ async def handle_webhook(request: Request) -> JSONResponse:
         return JSONResponse(content={"status": "ok"}, status_code=200)
 
 
+def process_qualification_tags(business_id: str, phone_number: str, response_text: str) -> str:
+    """
+    Parses dynamic qualification tags [QUALIFY: budget=MIN-MAX, location=NAME] from the AI's response,
+    saves the fields to the contacts database, and removes the tag from the final message.
+    """
+    if not response_text:
+        return response_text
+        
+    match = re.search(r'\[QUALIFY:\s*budget=([^,]*),\s*location=([^\]]*)\]', response_text)
+    if match:
+        budget_raw = match.group(1).strip()
+        location_raw = match.group(2).strip()
+        
+        # Parse budgets
+        budget_min = ""
+        budget_max = ""
+        if budget_raw:
+            parts = budget_raw.split('-')
+            if len(parts) == 2:
+                budget_min = parts[0].strip()
+                budget_max = parts[1].strip()
+            else:
+                budget_min = budget_raw.strip()
+                budget_max = budget_raw.strip()
+                
+        # Save to database
+        db.qualify_lead(
+            business_id=business_id,
+            phone_number=phone_number,
+            budget_min=budget_min,
+            budget_max=budget_max,
+            preferred_location=location_raw
+        )
+        
+        # Strip the tag from the text
+        response_text = re.sub(r'\[QUALIFY:[^\]]*\]', '', response_text).strip()
+        
+    return response_text
+
+
 async def extract_order_details_via_llm(business_id: str, phone_number: str, last_message: str) -> dict:
     """
     Query Groq to parse the order items, total amount, and delivery address
@@ -773,6 +813,9 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
         )
         
         if ai_response:
+            # Process real estate lead qualification tags
+            ai_response = process_qualification_tags(business_id, phone_number, ai_response)
+            
             # Check for AI-triggered handoff
             if "[HANDOFF_TRIGGERED]" in ai_response:
                 ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
@@ -1005,6 +1048,9 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
 
         if not ai_response:
             ai_response = "sorry, something went wrong on my end. please try again"
+        else:
+            # Process real estate lead qualification tags
+            ai_response = process_qualification_tags(business_id, phone_number, ai_response)
 
         # Check for AI-triggered handoff
         if "[HANDOFF_TRIGGERED]" in ai_response:
@@ -1298,6 +1344,9 @@ async def trigger_ai_response(phone: str, req: TriggerAIRequest, request: Reques
     if not ai_response:
         raise HTTPException(status_code=500, detail="AI engine failed to generate response")
         
+    # Process real estate lead qualification tags
+    ai_response = process_qualification_tags(req.business_id, phone, ai_response)
+        
     # Check for AI-triggered handoff
     if "[HANDOFF_TRIGGERED]" in ai_response:
         ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
@@ -1498,6 +1547,11 @@ class ProductCreate(BaseModel):
     price: Optional[str] = ""
     image_url: Optional[str] = ""
     category: Optional[str] = ""
+    bedrooms: Optional[int] = 0
+    bathrooms: Optional[int] = 0
+    property_type: Optional[str] = ""
+    location: Optional[str] = ""
+    virtual_tour_url: Optional[str] = ""
 
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
@@ -1506,6 +1560,11 @@ class ProductUpdate(BaseModel):
     image_url: Optional[str] = None
     category: Optional[str] = None
     is_available: Optional[bool] = None
+    bedrooms: Optional[int] = None
+    bathrooms: Optional[int] = None
+    property_type: Optional[str] = None
+    location: Optional[str] = None
+    virtual_tour_url: Optional[str] = None
 
 
 @app.get("/products")
@@ -1526,7 +1585,12 @@ async def add_product(request: Request, product: ProductCreate):
         description=product.description,
         price=product.price,
         image_url=product.image_url,
-        category=product.category
+        category=product.category,
+        bedrooms=product.bedrooms,
+        bathrooms=product.bathrooms,
+        property_type=product.property_type,
+        location=product.location,
+        virtual_tour_url=product.virtual_tour_url
     )
     if product_id:
         return {"status": "success", "product_id": product_id, "message": f"Product '{product.name}' added successfully"}
@@ -1680,6 +1744,9 @@ async def _process_and_reply_evolution(business_id: str, phone_number: str, mess
         )
         
         if ai_response:
+            # Process real estate lead qualification tags
+            ai_response = process_qualification_tags(business_id, phone_number, ai_response)
+            
             # Check for AI-triggered handoff
             if "[HANDOFF_TRIGGERED]" in ai_response:
                 ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
