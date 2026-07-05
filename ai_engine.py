@@ -265,6 +265,7 @@ CRITICAL RULES:
 2. NEVER use bullet points, numbered lists, asterisks, or markdown formatting. Just type like a real person on WhatsApp.
 3. ONE question at a time. Don't overwhelm the customer.
 4. {rule_4}
+5. Never misspell or alter payment gateway names. Always write OPay as 'OPay' (never write it as 'Ola pay' or similar).
 """
 
         if greeting:
