@@ -385,6 +385,13 @@ PRODUCTS / SERVICES & PRICES:
 
 IMPORTANT: Only recommend products/services from this list. Do NOT make up items or prices that are not listed above.
 """
+        else:
+            prompt += """
+PRODUCTS / SERVICES & PRICES:
+(No products, properties, or services are currently configured in our catalog)
+
+IMPORTANT: We currently have NO products, packages, properties, or services listed in our catalog. If the customer asks about packages, pricing, products, or services, politely explain that the catalog is currently being updated and ask them to check back shortly or let them know you can connect them with an agent. Under NO circumstances should you invent, make up, or hallucinate any packages, properties, items, or prices.
+"""
 
         if bot_mode == "real_estate":
             fee_val = str(inspection_fee).strip()
