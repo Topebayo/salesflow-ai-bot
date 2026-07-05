@@ -1786,7 +1786,7 @@ async def delete_evolution_message(
         logger.error("EVOLUTION_API_URL is not configured for deletion!")
         return False
         
-    url = f"{EVOLUTION_API_URL}/message/delete/{instance_name}"
+    url = f"{EVOLUTION_API_URL}/chat/deleteMessageForEveryone/{instance_name}"
     headers = {
         "apikey": apikey,
         "Content-Type": "application/json"
@@ -1794,12 +1794,12 @@ async def delete_evolution_message(
     payload = {
         "remoteJid": remote_jid,
         "fromMe": True,
-        "id": message_id
+        "messageId": message_id
     }
     
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(url, headers=headers, json=payload)
+            response = await client.request("DELETE", url, headers=headers, json=payload)
             if response.status_code in (200, 201):
                 logger.info(f"Evolution message {message_id} deleted successfully.")
                 return True
