@@ -1773,6 +1773,44 @@ async def _process_and_reply_evolution(business_id: str, phone_number: str, mess
         logger.error(f"Background Evolution reply error: {e}")
 
 
+async def delete_evolution_message(
+    instance_name: str,
+    apikey: str,
+    remote_jid: str,
+    message_id: str
+) -> bool:
+    """
+    Delete a message for everyone using the Evolution API.
+    """
+    if not EVOLUTION_API_URL:
+        logger.error("EVOLUTION_API_URL is not configured for deletion!")
+        return False
+        
+    url = f"{EVOLUTION_API_URL}/message/delete/{instance_name}"
+    headers = {
+        "apikey": apikey,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "remoteJid": remote_jid,
+        "fromMe": True,
+        "id": message_id
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code in (200, 201):
+                logger.info(f"Evolution message {message_id} deleted successfully.")
+                return True
+            else:
+                logger.error(f"Evolution delete failed. Status: {response.status_code}, Body: {response.text}")
+                return False
+    except Exception as e:
+        logger.error(f"Error deleting Evolution message: {e}")
+        return False
+
+
 @app.post("/webhook/evolution/{business_id}")
 async def handle_evolution_webhook(business_id: str, request: Request) -> JSONResponse:
     """
@@ -1792,7 +1830,38 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
             
             # Only process incoming messages (not outgoing ones)
             key = data.get("key", {})
-            if key.get("fromMe", False):
+            from_me = key.get("fromMe", False)
+            remote_jid = key.get("remoteJid", "")
+            message_id = key.get("id", "")
+            phone_number = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
+            
+            message_obj = data.get("message", {})
+            # Handle text messages
+            message_body = (
+                message_obj.get("conversation") or
+                message_obj.get("extendedTextMessage", {}).get("text") or
+                ""
+            )
+            
+            if from_me:
+                # Intercept slash commands to silently pause/resume AI in-thread
+                clean_msg = message_body.strip().lower()
+                if clean_msg in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop', '/handon', '/resume', 'resume bot', 'resume ai', '/ai', '/start']:
+                    creds = db.get_business_credentials(business_id)
+                    instance_name = creds.get("evolution_instance_name", "")
+                    apikey = creds.get("evolution_apikey", "")
+                    
+                    if clean_msg in ['/handoff', '/pause', 'pause bot', 'pause ai', '/human', '/stop']:
+                        db.set_human_handoff(business_id, phone_number, True)
+                        logger.info(f"Admin paused AI in-thread for {phone_number} (fromMe)")
+                    else:
+                        db.set_human_handoff(business_id, phone_number, False)
+                        logger.info(f"Admin resumed AI in-thread for {phone_number} (fromMe)")
+                        
+                    # Silently delete the slash command so the customer doesn't see it
+                    if instance_name and apikey and remote_jid and message_id:
+                        await delete_evolution_message(instance_name, apikey, remote_jid, message_id)
+                        
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
             # Extract message content
