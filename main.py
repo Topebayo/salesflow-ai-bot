@@ -2049,6 +2049,13 @@ async def transcribe_evolution_audio(audio_obj: dict, apikey: str) -> str:
             if url:
                 if url.startswith("/"):
                     url = f"{EVOLUTION_API_URL}{url}"
+                elif "localhost" in url or "127.0.0.1" in url:
+                    path_start = url.find("/media/")
+                    if path_start == -1:
+                        path_start = url.find("/instances/")
+                    if path_start != -1:
+                        url = f"{EVOLUTION_API_URL}{url[path_start:]}"
+                        
                 logger.info(f"🎙️ Downloading audio from Evolution API: {url}")
                 headers = {"apikey": apikey}
                 async with httpx.AsyncClient(timeout=15.0) as client:
@@ -2077,9 +2084,10 @@ async def transcribe_evolution_audio(audio_obj: dict, apikey: str) -> str:
         filename = f"voice_note.{ext}"
         
         # 4. Transcribe using Groq Whisper API
+        import io
         logger.info(f"🎙️ Sending {len(audio_bytes)} bytes of {mimetype} to Groq Whisper...")
         transcription = await ai_engine.client.audio.transcriptions.create(
-            file=(filename, audio_bytes),
+            file=(filename, io.BytesIO(audio_bytes)),
             model="whisper-large-v3",
             response_format="text"
         )
