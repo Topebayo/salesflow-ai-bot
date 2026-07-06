@@ -1800,9 +1800,16 @@ async def upload_product_image(
     if not db.client:
         return JSONResponse(status_code=500, content={"status": "error", "message": "Database not initialized"})
     
+    # Security check: Validate MIME type and File Size (max 5MB)
+    allowed_types = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/jpg"]
+    if file.content_type not in allowed_types:
+        return JSONResponse(status_code=400, content={"status": "error", "message": f"Invalid file type: {file.content_type}. Only JPEG, PNG, WEBP, and GIF are allowed."})
+    
     try:
         # Read file contents
         contents = await file.read()
+        if len(contents) > 5 * 1024 * 1024:  # 5 MB limit
+            return JSONResponse(status_code=400, content={"status": "error", "message": "File size exceeds 5MB limit."})
         
         # Build file path
         # format: {business_id}/{timestamp}_{filename}
