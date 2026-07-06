@@ -1184,9 +1184,6 @@ async def update_settings(request: Request, settings: SettingsUpdate):
         return {"status": "success", "message": "Settings updated"}
     return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to update settings"})
 
-class AutoTrainRequest(BaseModel):
-    business_id: str
-
 
 async def auto_train_from_chats_task(business_id: str):
     """
@@ -1205,84 +1202,75 @@ async def auto_train_from_chats_task(business_id: str):
             db.update_auto_learned_knowledge(business_id, "WhatsApp device is not connected. Connect your device first!")
             return
             
-        # Get active chats
         headers = {"apikey": apikey}
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            chats_res = await client.get(
-                f"{EVOLUTION_API_URL}/chat/findChats/{instance_name}",
-                headers=headers
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            # Query recent messages directly from instance database cache (limit 250 to get a deep context)
+            msg_res = await client.post(
+                f"{EVOLUTION_API_URL}/chat/findMessages/{instance_name}",
+                headers=headers,
+                json={"limit": 250}
             )
-            if chats_res.status_code != 200:
-                logger.error(f"❌ Evolution API findChats failed: {chats_res.text}")
-                db.update_auto_learned_knowledge(business_id, "Failed to retrieve chats from WhatsApp device. Ensure device is online.")
+            
+            if msg_res.status_code != 200:
+                logger.error(f"❌ Evolution API findMessages failed with status {msg_res.status_code}: {msg_res.text}")
+                db.update_auto_learned_knowledge(business_id, "Failed to retrieve messages from WhatsApp server. Ensure your Evolution API service is running.")
                 return
-            
-            chats = chats_res.json()
-            if isinstance(chats, dict):
-                chats = chats.get("chats", [])
-            
-            if not chats:
-                logger.info("ℹ️ No active chats found to train from.")
+                
+            data = msg_res.json()
+            messages = []
+            if isinstance(data, dict):
+                if "messages" in data:
+                    messages = data["messages"].get("records", [])
+                else:
+                    messages = data.get("records", [])
+            elif isinstance(data, list):
+                messages = data
+                
+            if not messages:
+                logger.info("ℹ️ No active chats/messages found to train from.")
                 db.update_auto_learned_knowledge(business_id, "No active chats found on device yet to train from. Start chatting with clients first!")
                 return
                 
-            # Limit to top 15 active chats
-            active_chats = chats[:15]
-            transcripts = []
+            # Group messages by remoteJid
+            chats_map = {}
+            # Messages are usually returned in reverse chronological order (newest first).
+            # We want them chronological (oldest first) per chat thread.
+            messages.reverse()
             
-            for chat in active_chats:
-                remote_jid = chat.get("id") or chat.get("remoteJid")
+            for msg in messages:
+                key = msg.get("key", {})
+                remote_jid = key.get("remoteJid", "")
                 if not remote_jid or "status@broadcast" in remote_jid:
                     continue
                 
-                # Fetch recent messages
-                msg_payload = {
-                    "where": {
-                        "key": {
-                            "remoteJid": remote_jid
-                        }
-                    },
-                    "limit": 40
-                }
+                if remote_jid not in chats_map:
+                    chats_map[remote_jid] = []
                 
-                msg_res = await client.post(
-                    f"{EVOLUTION_API_URL}/chat/findMessages/{instance_name}",
-                    headers=headers,
-                    json=msg_payload
-                )
+                # Extract message body
+                msg_body = ""
+                message = msg.get("message", {})
+                if not message:
+                    continue
+                if "conversation" in message:
+                    msg_body = message["conversation"]
+                elif "extendedTextMessage" in message:
+                    msg_body = message["extendedTextMessage"].get("text", "")
                 
-                if msg_res.status_code == 200:
-                    data = msg_res.json()
-                    messages = data.get("messages", []) if isinstance(data, dict) else data
-                    if not isinstance(messages, list):
-                        continue
-                        
-                    chat_log = []
-                    messages.reverse() # Oldest messages first
-                    
-                    for msg in messages:
-                        key = msg.get("key", {})
-                        from_me = key.get("fromMe", False)
-                        
-                        msg_body = ""
-                        message = msg.get("message", {})
-                        if not message:
-                            continue
-                            
-                        if "conversation" in message:
-                            msg_body = message["conversation"]
-                        elif "extendedTextMessage" in message:
-                            msg_body = message["extendedTextMessage"].get("text", "")
-                        
-                        if msg_body:
-                            sender = "Merchant" if from_me else "Client"
-                            chat_log.append(f"{sender}: {msg_body}")
-                            
-                    if chat_log:
-                        transcripts.append(f"--- Chat with {remote_jid.split('@')[0]} ---\n" + "\n".join(chat_log))
+                if msg_body:
+                    from_me = key.get("fromMe", False)
+                    sender = "Merchant" if from_me else "Client"
+                    chats_map[remote_jid].append(f"{sender}: {msg_body}")
             
+            # Format compiled transcripts
+            transcripts = []
+            for jid, logs in chats_map.items():
+                if not logs:
+                    continue
+                clean_phone = jid.split('@')[0]
+                transcripts.append(f"--- Chat with Client ({clean_phone}) ---\n" + "\n".join(logs))
+                
             if not transcripts:
-                logger.info("ℹ️ No message transcripts extracted.")
+                logger.info("ℹ️ No text message transcripts extracted.")
                 db.update_auto_learned_knowledge(business_id, "No text messages found in chats yet to train from.")
                 return
                 
@@ -1320,6 +1308,10 @@ Format the output strictly as clean, bulleted plain text. Do NOT use markdown bo
     except Exception as e:
         logger.error(f"❌ Error in auto_train_from_chats_task: {e}")
         db.update_auto_learned_knowledge(business_id, f"Error processing training job: {str(e)}")
+
+
+class AutoTrainRequest(BaseModel):
+    business_id: str
 
 
 @app.post("/businesses/auto-train")
