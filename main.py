@@ -2028,6 +2028,71 @@ async def delete_evolution_message(
         return False
 
 
+async def transcribe_evolution_audio(audio_obj: dict, apikey: str) -> str:
+    """Download audio message from Evolution API and transcribe it using Groq Whisper."""
+    try:
+        audio_bytes = None
+        mimetype = audio_obj.get("mimetype", "audio/ogg")
+        
+        # 1. Try base64
+        base64_data = audio_obj.get("base64") or audio_obj.get("base64Data")
+        if base64_data:
+            import base64
+            if "," in base64_data:
+                base64_data = base64_data.split(",")[1]
+            audio_bytes = base64.b64decode(base64_data)
+            logger.info("🎙️ Decoded base64 audio data successfully.")
+            
+        # 2. Try URL download
+        if not audio_bytes:
+            url = audio_obj.get("url")
+            if url:
+                if url.startswith("/"):
+                    url = f"{EVOLUTION_API_URL}{url}"
+                logger.info(f"🎙️ Downloading audio from Evolution API: {url}")
+                headers = {"apikey": apikey}
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    res = await client.get(url, headers=headers)
+                    if res.status_code == 200:
+                        audio_bytes = res.content
+                        logger.info("🎙️ Audio downloaded successfully.")
+                    else:
+                        logger.error(f"❌ Failed to download audio from {url}: status {res.status_code}")
+                        
+        if not audio_bytes:
+            logger.error("❌ No audio data found to transcribe.")
+            return ""
+            
+        # 3. Determine file extension
+        ext = "ogg"
+        if "mp3" in mimetype:
+            ext = "mp3"
+        elif "mp4" in mimetype:
+            ext = "mp4"
+        elif "wav" in mimetype:
+            ext = "wav"
+        elif "webm" in mimetype:
+            ext = "webm"
+            
+        filename = f"voice_note.{ext}"
+        
+        # 4. Transcribe using Groq Whisper API
+        logger.info(f"🎙️ Sending {len(audio_bytes)} bytes of {mimetype} to Groq Whisper...")
+        transcription = await ai_engine.client.audio.transcriptions.create(
+            file=(filename, audio_bytes),
+            model="whisper-large-v3",
+            response_format="text"
+        )
+        
+        text = transcription.strip() if isinstance(transcription, str) else getattr(transcription, 'text', '').strip()
+        logger.info(f"🎙️ Transcribed voice note: '{text}'")
+        return text
+        
+    except Exception as e:
+        logger.error(f"❌ Error transcribing Evolution audio: {e}")
+        return ""
+
+
 @app.post("/webhook/evolution/{business_id}")
 async def handle_evolution_webhook(business_id: str, request: Request) -> JSONResponse:
     """
@@ -2094,6 +2159,16 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
                 ""
             )
             
+            # Handle voice notes / audio messages
+            audio_obj = message_obj.get("audioMessage")
+            is_voice_note = False
+            if audio_obj and not message_body:
+                creds = db.get_business_credentials(business_id)
+                transcription = await transcribe_evolution_audio(audio_obj, creds.get("evolution_apikey", ""))
+                if transcription:
+                    message_body = transcription
+                    is_voice_note = True
+            
             if not message_body:
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
@@ -2105,7 +2180,8 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
                 db.update_contact_name(business_id, phone_number, sender_name)
             
             # Ensure contact exists in database
-            db.save_message(business_id, phone_number, "user", message_body)
+            db_save_body = f"🎙️ (Voice Note): {message_body}" if is_voice_note else message_body
+            db.save_message(business_id, phone_number, "user", db_save_body)
             
             # Check human handoff
             if db.is_human_handoff(business_id, phone_number):
