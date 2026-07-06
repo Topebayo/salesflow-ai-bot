@@ -2028,49 +2028,74 @@ async def delete_evolution_message(
         return False
 
 
-async def transcribe_evolution_audio(audio_obj: dict, apikey: str) -> str:
+async def transcribe_evolution_audio(audio_obj: dict, apikey: str, instance_name: str = "", message_id: str = "") -> str:
     """Download audio message from Evolution API and transcribe it using Groq Whisper."""
     try:
         audio_bytes = None
         mimetype = audio_obj.get("mimetype", "audio/ogg")
         
-        # 1. Try base64
+        # 1. Try base64 directly in audio_obj
         base64_data = audio_obj.get("base64") or audio_obj.get("base64Data")
         if base64_data:
             import base64
             if "," in base64_data:
                 base64_data = base64_data.split(",")[1]
             audio_bytes = base64.b64decode(base64_data)
-            logger.info("🎙️ Decoded base64 audio data successfully.")
+            logger.info("🎙️ Decoded base64 audio data successfully from payload.")
             
         # 2. Try URL download
         if not audio_bytes:
-            url = audio_obj.get("url")
-            if url:
-                if url.startswith("/"):
-                    url = f"{EVOLUTION_API_URL}{url}"
-                elif "localhost" in url or "127.0.0.1" in url:
+            url = audio_obj.get("url") or audio_obj.get("mediaUrl") or audio_obj.get("directPath")
+            if url and url.startswith("http"):
+                if "localhost" in url or "127.0.0.1" in url:
                     path_start = url.find("/media/")
                     if path_start == -1:
                         path_start = url.find("/instances/")
                     if path_start != -1:
                         url = f"{EVOLUTION_API_URL}{url[path_start:]}"
                         
-                logger.info(f"🎙️ Downloading audio from Evolution API: {url}")
+                logger.info(f"🎙️ Downloading audio from Evolution API URL: {url}")
                 headers = {"apikey": apikey}
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     res = await client.get(url, headers=headers)
                     if res.status_code == 200:
                         audio_bytes = res.content
-                        logger.info("🎙️ Audio downloaded successfully.")
+                        logger.info("🎙️ Audio downloaded successfully from URL.")
                     else:
                         logger.error(f"❌ Failed to download audio from {url}: status {res.status_code}")
                         
+        # 3. Try Evolution API getBase64FromMediaMessage endpoint (when webhookBase64 is false)
+        if not audio_bytes and instance_name and message_id:
+            logger.info(f"🎙️ Fetching base64 media via getBase64FromMediaMessage for message {message_id} on {instance_name}...")
+            endpoint = f"{EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{instance_name}"
+            headers = {"apikey": apikey}
+            payload = {
+                "message": {
+                    "key": {
+                        "id": message_id
+                    }
+                },
+                "convertToMp4": False
+            }
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                res = await client.post(endpoint, json=payload, headers=headers)
+                if res.status_code in [200, 201]:
+                    res_json = res.json()
+                    base64_data = res_json.get("base64") or res_json.get("base64Data") or res_json.get("data")
+                    if isinstance(base64_data, str):
+                        import base64
+                        if "," in base64_data:
+                            base64_data = base64_data.split(",")[1]
+                        audio_bytes = base64.b64decode(base64_data)
+                        logger.info("🎙️ Audio fetched and decoded via getBase64FromMediaMessage successfully.")
+                else:
+                    logger.error(f"❌ getBase64FromMediaMessage failed: {res.status_code} - {res.text}")
+
         if not audio_bytes:
             logger.error("❌ No audio data found to transcribe.")
             return ""
             
-        # 3. Determine file extension
+        # 4. Determine file extension
         ext = "ogg"
         if "mp3" in mimetype:
             ext = "mp3"
@@ -2168,11 +2193,23 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
             )
             
             # Handle voice notes / audio messages
-            audio_obj = message_obj.get("audioMessage")
+            audio_obj = (
+                message_obj.get("audioMessage") or
+                message_obj.get("voiceMessage") or
+                message_obj.get("ephemeralMessage", {}).get("message", {}).get("audioMessage") or
+                message_obj.get("viewOnceMessage", {}).get("message", {}).get("audioMessage") or
+                message_obj.get("viewOnceMessageV2", {}).get("message", {}).get("audioMessage") or
+                data.get("audioMessage")
+            )
             is_voice_note = False
             if audio_obj and not message_body:
                 creds = db.get_business_credentials(business_id)
-                transcription = await transcribe_evolution_audio(audio_obj, creds.get("evolution_apikey", ""))
+                transcription = await transcribe_evolution_audio(
+                    audio_obj=audio_obj,
+                    apikey=creds.get("evolution_apikey", ""),
+                    instance_name=creds.get("evolution_instance_name", ""),
+                    message_id=key.get("id", "")
+                )
                 if transcription:
                     message_body = transcription
                     is_voice_note = True
