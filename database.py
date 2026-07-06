@@ -348,13 +348,25 @@ class Database:
         try:
             res = self.client.table("businesses").select(
                 "name, bot_mode, agent_name, greeting, business_description, "
-                "products_services, payment_info, business_hours, custom_rules, tone, inspection_fee, admin_phone"
+                "products_services, payment_info, business_hours, custom_rules, tone, inspection_fee, admin_phone, auto_learned_knowledge"
             ).eq("id", business_id).execute()
             if res.data and len(res.data) > 0:
                 return res.data[0]
         except Exception as e:
             logger.error(f"Error fetching business config: {e}")
         return {}
+
+    def update_auto_learned_knowledge(self, business_id: str, knowledge: str) -> bool:
+        """Update the auto-learned chat knowledge base for a business."""
+        if not self.client or not business_id: return False
+        try:
+            self.client.table("businesses").update({
+                "auto_learned_knowledge": knowledge
+            }).eq("id", business_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating auto-learned knowledge: {e}")
+            return False
 
     # =========================================================================
     # WHATSAPP CREDENTIALS (SaaS — Per-Business)

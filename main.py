@@ -19,7 +19,7 @@ from typing import Optional, List
 from contextlib import asynccontextmanager
 
 from fastapi.responses import PlainTextResponse, JSONResponse
-from fastapi import FastAPI, Request, HTTPException, Query, Form, File, UploadFile
+from fastapi import FastAPI, Request, HTTPException, Query, Form, File, UploadFile, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.messaging_response import MessagingResponse
@@ -1183,6 +1183,164 @@ async def update_settings(request: Request, settings: SettingsUpdate):
     if success:
         return {"status": "success", "message": "Settings updated"}
     return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to update settings"})
+
+class AutoTrainRequest(BaseModel):
+    business_id: str
+
+
+async def auto_train_from_chats_task(business_id: str):
+    """
+    Background job that retrieves chat logs from Evolution API,
+    synthesizes FAQs/rules/tone, and saves to database.
+    """
+    logger.info(f"🔄 Starting auto-training background task for business {business_id}")
+    try:
+        # Get credentials
+        creds = db.get_business_credentials(business_id)
+        instance_name = creds.get("evolution_instance_name")
+        apikey = creds.get("evolution_apikey")
+        
+        if not instance_name or not apikey or not EVOLUTION_API_URL:
+            logger.error(f"❌ Evolution API details not configured for business {business_id}")
+            db.update_auto_learned_knowledge(business_id, "WhatsApp device is not connected. Connect your device first!")
+            return
+            
+        # Get active chats
+        headers = {"apikey": apikey}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            chats_res = await client.get(
+                f"{EVOLUTION_API_URL}/chat/findChats/{instance_name}",
+                headers=headers
+            )
+            if chats_res.status_code != 200:
+                logger.error(f"❌ Evolution API findChats failed: {chats_res.text}")
+                db.update_auto_learned_knowledge(business_id, "Failed to retrieve chats from WhatsApp device. Ensure device is online.")
+                return
+            
+            chats = chats_res.json()
+            if isinstance(chats, dict):
+                chats = chats.get("chats", [])
+            
+            if not chats:
+                logger.info("ℹ️ No active chats found to train from.")
+                db.update_auto_learned_knowledge(business_id, "No active chats found on device yet to train from. Start chatting with clients first!")
+                return
+                
+            # Limit to top 15 active chats
+            active_chats = chats[:15]
+            transcripts = []
+            
+            for chat in active_chats:
+                remote_jid = chat.get("id") or chat.get("remoteJid")
+                if not remote_jid or "status@broadcast" in remote_jid:
+                    continue
+                
+                # Fetch recent messages
+                msg_payload = {
+                    "where": {
+                        "key": {
+                            "remoteJid": remote_jid
+                        }
+                    },
+                    "limit": 40
+                }
+                
+                msg_res = await client.post(
+                    f"{EVOLUTION_API_URL}/chat/findMessages/{instance_name}",
+                    headers=headers,
+                    json=msg_payload
+                )
+                
+                if msg_res.status_code == 200:
+                    data = msg_res.json()
+                    messages = data.get("messages", []) if isinstance(data, dict) else data
+                    if not isinstance(messages, list):
+                        continue
+                        
+                    chat_log = []
+                    messages.reverse() # Oldest messages first
+                    
+                    for msg in messages:
+                        key = msg.get("key", {})
+                        from_me = key.get("fromMe", False)
+                        
+                        msg_body = ""
+                        message = msg.get("message", {})
+                        if not message:
+                            continue
+                            
+                        if "conversation" in message:
+                            msg_body = message["conversation"]
+                        elif "extendedTextMessage" in message:
+                            msg_body = message["extendedTextMessage"].get("text", "")
+                        
+                        if msg_body:
+                            sender = "Merchant" if from_me else "Client"
+                            chat_log.append(f"{sender}: {msg_body}")
+                            
+                    if chat_log:
+                        transcripts.append(f"--- Chat with {remote_jid.split('@')[0]} ---\n" + "\n".join(chat_log))
+            
+            if not transcripts:
+                logger.info("ℹ️ No message transcripts extracted.")
+                db.update_auto_learned_knowledge(business_id, "No text messages found in chats yet to train from.")
+                return
+                
+            compiled_transcripts = "\n\n".join(transcripts)
+            
+            # Send to Groq for synthesis
+            sys_prompt = """You are an expert business analyst and LLM instruction writer.
+Your job is to analyze WhatsApp chat logs between a Merchant and their Clients.
+Extract the following information to train a sales assistant AI:
+1. CUSTOMER FAQs: Identify the top 5-10 questions clients frequently ask and how the merchant answers them. Write them as short Q&A pairs.
+2. SIGNATURE TONE & STYLE: Extract guidelines about how the merchant writes (e.g. greeting style, slang used, punctuation, emoji choices).
+3. PRODUCTS & PRICES: Any products, services, locations, or prices mentioned.
+
+Format the output strictly as clean, bulleted plain text. Do NOT use markdown bold headers or HTML. Simply start with sections like 'CUSTOMER FAQS:', 'MERCHANT TONE & WRITING STYLE:', and 'PRODUCTS & PRICES:'. Keep it concise and under 500 words total. Do not output conversational filler.
+"""
+            
+            user_prompt = f"Here are the chat logs to analyze:\n\n{compiled_transcripts}"
+            
+            groq_res = await ai_engine.client.chat.completions.create(
+                model=ai_engine.model_name,
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=1000,
+                temperature=0.3
+            )
+            
+            synthesized_knowledge = groq_res.choices[0].message.content.strip()
+            
+            # Save synthesized knowledge to database
+            db.update_auto_learned_knowledge(business_id, synthesized_knowledge)
+            logger.info(f"✅ Successfully auto-trained business {business_id} from chats!")
+            
+    except Exception as e:
+        logger.error(f"❌ Error in auto_train_from_chats_task: {e}")
+        db.update_auto_learned_knowledge(business_id, f"Error processing training job: {str(e)}")
+
+
+@app.post("/businesses/auto-train")
+@limiter.limit("2/minute")
+async def trigger_auto_train(request: Request, req: AutoTrainRequest, background_tasks: BackgroundTasks):
+    """Trigger WhatsApp chat analysis and prompt auto-training in the background."""
+    creds = db.get_business_credentials(req.business_id)
+    instance_name = creds.get("evolution_instance_name")
+    apikey = creds.get("evolution_apikey")
+    
+    if not instance_name or not apikey:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "message": "WhatsApp device is not connected. Please scan the QR code first!"}
+        )
+    
+    # Reset knowledge status in DB to "TRAINING_IN_PROGRESS"
+    db.update_auto_learned_knowledge(req.business_id, "TRAINING_IN_PROGRESS")
+    background_tasks.add_task(auto_train_from_chats_task, req.business_id)
+    return {"status": "success", "message": "Auto-training started in the background. This may take up to a minute."}
+
 
 @app.get("/health")
 @limiter.limit("60/minute")

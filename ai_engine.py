@@ -294,6 +294,13 @@ GREETING: When a customer says "hi", "hello", or starts a new conversation, repl
 ABOUT THE BUSINESS: {description}
 """
 
+        auto_learned_knowledge = config.get("auto_learned_knowledge", "")
+        if auto_learned_knowledge:
+            prompt += f"""
+ADDITIONAL BUSINESS KNOWLEDGE & FAQS (AUTO-LEARNT FROM HISTORICAL CHATS):
+{auto_learned_knowledge}
+"""
+
         # Fetch products from database if business_id is provided
         db_products = []
         if business_id:
