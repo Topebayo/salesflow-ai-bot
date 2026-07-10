@@ -11,6 +11,8 @@ Version: 1.0.0
 """
 
 import os
+import hmac
+import hashlib
 import re
 import logging
 import asyncio
@@ -796,14 +798,30 @@ async def extract_order_details_via_llm(business_id: str, phone_number: str, las
 async def _process_and_reply_meta(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
     """Background task: generate AI response, detect orders, then send via Meta Graph API."""
     try:
-        # Simulate human typing delay (7 seconds) so it doesn't look like a bot
-        await asyncio.sleep(7)
+        # Simulate human typing delay (15 seconds) so it doesn't look like a bot
+        await asyncio.sleep(15)
         
         # Get business credentials
         creds = db.get_business_credentials(business_id)
         access_token = creds.get("meta_access_token")
         phone_number_id = creds.get("meta_phone_number_id")
         
+        # Check message quota limit
+        usage = db.get_business_usage(business_id)
+        used = usage.get("messages_used_this_month", 0) or 0
+        limit = usage.get("monthly_message_limit", 500) or 500
+        plan = usage.get("plan_type", "starter") or "starter"
+        
+        if used >= limit and limit != -1:
+            logger.warning(f"⚠️ Quota reached for business {business_id} ({used}/{limit}) on Meta")
+            await send_whatsapp_message(
+                recipient_phone=phone_number,
+                message_text=f"⚠️ *Automated Notice from SalesFlow AI*:\n\nYour WhatsApp AI agent has reached its monthly conversation limit (*{limit} messages*) on the *{plan.upper()} Plan*.\n\nTo resume 24/7 automated replies instantly, kindly log into your dashboard at https://salesaiflow.online and renew or upgrade your plan.",
+                access_token=access_token,
+                phone_number_id=phone_number_id
+            )
+            return
+
         # Generate AI response using AI Engine (Multi-Tenant)
         ai_response = await ai_engine.generate_response(
             business_id=business_id,
@@ -813,6 +831,7 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
         )
         
         if ai_response:
+            db.increment_message_usage(business_id)
             # Process real estate lead qualification tags
             ai_response = process_qualification_tags(business_id, phone_number, ai_response)
             
@@ -1035,8 +1054,22 @@ async def _send_twilio_message(phone_number: str, message: str, media_url: str =
 async def _process_and_reply_twilio(business_id: str, phone_number: str, user_message: str, profile_name: str = None):
     """Background task: generate AI response, detect orders, then send via Twilio REST API."""
     try:
-        # Simulate human typing delay (7 seconds)
-        await asyncio.sleep(7)
+        # Simulate human typing delay (15 seconds)
+        await asyncio.sleep(15)
+
+        # Check message quota limit
+        usage = db.get_business_usage(business_id)
+        used = usage.get("messages_used_this_month", 0) or 0
+        limit = usage.get("monthly_message_limit", 500) or 500
+        plan = usage.get("plan_type", "starter") or "starter"
+        
+        if used >= limit and limit != -1:
+            logger.warning(f"⚠️ Quota reached for business {business_id} ({used}/{limit}) on Twilio")
+            await _send_twilio_message(
+                phone_number,
+                f"⚠️ *Automated Notice from SalesFlow AI*:\n\nYour WhatsApp AI agent has reached its monthly conversation limit (*{limit} messages*) on the *{plan.upper()} Plan*.\n\nTo resume 24/7 automated replies instantly, kindly log into your dashboard at https://salesaiflow.online and renew or upgrade your plan."
+            )
+            return
 
         # Generate AI response
         ai_response = await ai_engine.generate_response(
@@ -1049,6 +1082,7 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
         if not ai_response:
             ai_response = "sorry, something went wrong on my end. please try again"
         else:
+            db.increment_message_usage(business_id)
             # Process real estate lead qualification tags
             ai_response = process_qualification_tags(business_id, phone_number, ai_response)
 
@@ -1183,6 +1217,68 @@ async def update_settings(request: Request, settings: SettingsUpdate):
     if success:
         return {"status": "success", "message": "Settings updated"}
     return JSONResponse(status_code=500, content={"status": "error", "message": "Failed to update settings"})
+
+
+@app.get("/api/usage")
+@limiter.limit("60/minute")
+async def get_usage(request: Request, business_id: str = Query(...)):
+    """Fetch monthly AI message quota and usage stats for dashboard display."""
+    usage = db.get_business_usage(business_id)
+    return JSONResponse(status_code=200, content=usage)
+
+
+@app.post("/webhook/paystack")
+async def handle_paystack_webhook(request: Request):
+    """
+    Paystack Webhook Handler.
+    Automatically unlocks or upgrades merchant subscription upon payment confirmation.
+    Verifies x-paystack-signature header using HMAC-SHA512.
+    """
+    try:
+        raw_body = await request.body()
+        secret_key = os.getenv("PAYSTACK_SECRET_KEY", "")
+        
+        # Check HMAC signature if x-paystack-signature header is provided
+        sig_header = request.headers.get("x-paystack-signature")
+        if sig_header and secret_key:
+            expected_sig = hmac.new(
+                secret_key.encode('utf-8'),
+                raw_body,
+                hashlib.sha512
+            ).hexdigest()
+            
+            if not hmac.compare_digest(sig_header, expected_sig):
+                logger.warning("❌ Paystack webhook signature verification failed!")
+                return JSONResponse(status_code=401, content={"status": "error", "message": "Invalid signature"})
+        
+        payload = await request.json()
+        event = payload.get("event")
+        data = payload.get("data", {})
+        
+        logger.info(f"💳 Received Paystack webhook event: {event}")
+        
+        if event == "charge.success":
+            metadata = data.get("metadata", {})
+            business_id = metadata.get("business_id")
+            plan_type = metadata.get("plan_type", "professional")
+            monthly_limit = int(metadata.get("monthly_limit", 2000))
+            
+            # Map plan names if needed
+            if plan_type == "professional":
+                monthly_limit = 2000
+            elif plan_type == "enterprise":
+                monthly_limit = 1000000
+            
+            if business_id:
+                success = db.upgrade_business_plan(business_id, plan_type, monthly_limit)
+                if success:
+                    logger.info(f"🎉 Paystack webhook auto-upgraded business {business_id} to {plan_type} (Limit: {monthly_limit})")
+                    return JSONResponse(status_code=200, content={"status": "success", "message": f"Upgraded {business_id} to {plan_type}"})
+        
+        return JSONResponse(status_code=200, content={"status": "ignored or processed"})
+    except Exception as e:
+        logger.error(f"❌ Paystack webhook error: {e}")
+        return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
 
 
 async def auto_train_from_chats_task(business_id: str):
@@ -1860,7 +1956,9 @@ async def send_evolution_message(
     }
     payload = {
         "number": recipient_phone,
-        "text": message_text
+        "text": message_text,
+        "delay": 2000,
+        "presence": "composing"
     }
     
     try:
@@ -1880,8 +1978,8 @@ async def send_evolution_message(
 async def _process_and_reply_evolution(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
     """Background task: generate AI response, then send via Evolution API."""
     try:
-        # Simulate human typing delay
-        await asyncio.sleep(7)
+        # Simulate human typing delay (15 seconds)
+        await asyncio.sleep(15)
         
         # Get business credentials
         creds = db.get_business_credentials(business_id)
@@ -1892,6 +1990,22 @@ async def _process_and_reply_evolution(business_id: str, phone_number: str, mess
             logger.error(f"Evolution credentials missing for business {business_id}")
             return
         
+        # Check message quota limit
+        usage = db.get_business_usage(business_id)
+        used = usage.get("messages_used_this_month", 0) or 0
+        limit = usage.get("monthly_message_limit", 500) or 500
+        plan = usage.get("plan_type", "starter") or "starter"
+        
+        if used >= limit and limit != -1:
+            logger.warning(f"⚠️ Quota reached for business {business_id} ({used}/{limit}) on Evolution")
+            await send_evolution_message(
+                phone_number,
+                f"⚠️ *Automated Notice from SalesFlow AI*:\n\nYour WhatsApp AI agent has reached its monthly conversation limit (*{limit} messages*) on the *{plan.upper()} Plan*.\n\nTo resume 24/7 automated replies instantly, kindly log into your dashboard at https://salesaiflow.online and renew or upgrade your plan.",
+                instance_name,
+                apikey
+            )
+            return
+
         # Generate AI response
         ai_response = await ai_engine.generate_response(
             business_id=business_id,
@@ -1901,6 +2015,7 @@ async def _process_and_reply_evolution(business_id: str, phone_number: str, mess
         )
         
         if ai_response:
+            db.increment_message_usage(business_id)
             # Process real estate lead qualification tags
             ai_response = process_qualification_tags(business_id, phone_number, ai_response)
             

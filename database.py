@@ -23,7 +23,8 @@ class Database:
     def __init__(self):
         """Initialize the Supabase client."""
         url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_KEY")
+        # Use service_role key if available for backend administrative operations (bypasses RLS safely on server)
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
         if not url or not key:
             logger.warning("Supabase URL or Key missing. Database operations will fail.")
             self.client = None
@@ -366,6 +367,53 @@ class Database:
             return True
         except Exception as e:
             logger.error(f"Error updating auto-learned knowledge: {e}")
+            return False
+
+    # =========================================================================
+    # QUOTAS & SUBSCRIPTIONS (PAYSTACK / PLAN TRACKING)
+    # =========================================================================
+
+    def get_business_usage(self, business_id: str) -> dict:
+        """Fetch a business's current subscription tier and monthly message usage."""
+        if not self.client or not business_id: return {}
+        try:
+            res = self.client.table("businesses").select(
+                "plan_type, monthly_message_limit, messages_used_this_month, subscription_status"
+            ).eq("id", business_id).execute()
+            if res.data and len(res.data) > 0:
+                return res.data[0]
+        except Exception as e:
+            logger.error(f"Error fetching business usage: {e}")
+        return {"plan_type": "starter", "monthly_message_limit": 500, "messages_used_this_month": 0, "subscription_status": "active"}
+
+    def increment_message_usage(self, business_id: str) -> bool:
+        """Increment the monthly AI message counter for a business by 1."""
+        if not self.client or not business_id: return False
+        try:
+            usage = self.get_business_usage(business_id)
+            current_used = usage.get("messages_used_this_month", 0) or 0
+            self.client.table("businesses").update({
+                "messages_used_this_month": current_used + 1
+            }).eq("id", business_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error incrementing message usage: {e}")
+            return False
+
+    def upgrade_business_plan(self, business_id: str, plan_type: str, monthly_limit: int) -> bool:
+        """Upgrade or renew a business subscription plan upon successful Paystack payment."""
+        if not self.client or not business_id: return False
+        try:
+            res = self.client.table("businesses").update({
+                "plan_type": plan_type,
+                "monthly_message_limit": monthly_limit,
+                "messages_used_this_month": 0,
+                "subscription_status": "active"
+            }).eq("id", business_id).execute()
+            logger.info(f"🎉 Successfully upgraded business {business_id} to {plan_type.upper()} ({monthly_limit} limit)")
+            return len(res.data) > 0
+        except Exception as e:
+            logger.error(f"Error upgrading business plan: {e}")
             return False
 
     # =========================================================================
