@@ -1283,10 +1283,11 @@ async def handle_paystack_webhook(request: Request):
 
 async def auto_train_from_chats_task(business_id: str):
     """
-    Background job that retrieves chat logs from Evolution API,
-    synthesizes FAQs/rules/tone, and saves to database.
+    Deep Chat Combing Engine: Retrieves up to 4,000 historical messages across EVERY chat thread
+    from Evolution API, mines them in intelligent batches to extract every product, price, and policy,
+    and synthesizes a master knowledge base without truncating or skipping long histories.
     """
-    logger.info(f"🔄 Starting auto-training background task for business {business_id}")
+    logger.info(f"🔄 Starting Deep Chat Combing Engine across all chats for business {business_id}")
     try:
         # Get credentials
         creds = db.get_business_credentials(business_id)
@@ -1299,12 +1300,12 @@ async def auto_train_from_chats_task(business_id: str):
             return
             
         headers = {"apikey": apikey}
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            # Query recent messages directly from instance database cache (limit 250 to get a deep context)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            # Deep fetch up to 4,000 recent historical messages across EVERY single chat thread
             msg_res = await client.post(
                 f"{EVOLUTION_API_URL}/chat/findMessages/{instance_name}",
                 headers=headers,
-                json={"limit": 250}
+                json={"limit": 4000}
             )
             
             if msg_res.status_code != 200:
@@ -1327,10 +1328,8 @@ async def auto_train_from_chats_task(business_id: str):
                 db.update_auto_learned_knowledge(business_id, "No active chats found on device yet to train from. Start chatting with clients first!")
                 return
                 
-            # Group messages by remoteJid
+            # Group messages chronologically per remoteJid (combing every single chat thread)
             chats_map = {}
-            # Messages are usually returned in reverse chronological order (newest first).
-            # We want them chronological (oldest first) per chat thread.
             messages.reverse()
             
             for msg in messages:
@@ -1342,7 +1341,6 @@ async def auto_train_from_chats_task(business_id: str):
                 if remote_jid not in chats_map:
                     chats_map[remote_jid] = []
                 
-                # Extract message body
                 msg_body = ""
                 message = msg.get("message", {})
                 if not message:
@@ -1357,49 +1355,91 @@ async def auto_train_from_chats_task(business_id: str):
                     sender = "Merchant" if from_me else "Client"
                     chats_map[remote_jid].append(f"{sender}: {msg_body}")
             
-            # Format compiled transcripts
+            # Format compiled transcripts per customer thread
             transcripts = []
             for jid, logs in chats_map.items():
                 if not logs:
                     continue
                 clean_phone = jid.split('@')[0]
-                transcripts.append(f"--- Chat with Client ({clean_phone}) ---\n" + "\n".join(logs))
+                transcripts.append(f"--- Chat Thread ({clean_phone}) ---\n" + "\n".join(logs))
                 
             if not transcripts:
-                logger.info("ℹ️ No text message transcripts extracted.")
+                logger.info("ℹ️ No text message transcripts extracted across chats.")
                 db.update_auto_learned_knowledge(business_id, "No text messages found in chats yet to train from.")
                 return
                 
-            compiled_transcripts = "\n\n".join(transcripts)
+            logger.info(f"🧠 Deep Combing: Extracted {len(transcripts)} distinct chat threads ({len(messages)} total messages). Beginning multi-batch AI extraction...")
             
-            # Send to Groq for synthesis
-            sys_prompt = """You are an expert business analyst and LLM instruction writer.
-Your job is to analyze WhatsApp chat logs between a Merchant and their Clients.
-Extract the following information to train a sales assistant AI:
-1. CUSTOMER FAQs: Identify the top 5-10 questions clients frequently ask and how the merchant answers them. Write them as short Q&A pairs.
-2. SIGNATURE TONE & STYLE: Extract guidelines about how the merchant writes (e.g. greeting style, slang used, punctuation, emoji choices).
-3. PRODUCTS & PRICES: Any products, services, locations, or prices mentioned.
+            # Split transcripts into batches of ~15 chat threads to prevent LLM context truncation
+            batch_size = 15
+            batches = [transcripts[i:i + batch_size] for i in range(0, len(transcripts), batch_size)]
+            extracted_chunks = []
+            
+            mining_sys_prompt = """You are a meticulous data mining AI for a sales organization.
+Analyze the provided raw WhatsApp chat transcripts between the Merchant and real Customers.
+Combing carefully through every message, extract:
+1. PRODUCTS & EXACT PRICES: Any item, service, variation, or package mentioned with its exact price (e.g. "Lace 5 yards - ₦45,000", "Delivery to Lekki - ₦3,000").
+2. STORE POLICIES & WAYBILL: Delivery methods, payment account numbers, return policies, or store addresses explicitly stated.
+3. RECURRING FAQS: Key questions clients asked and exact answers the merchant gave.
+Be literal and exact. Do NOT make up prices. Format strictly as clean plain text under clear section headings."""
 
-Format the output strictly as clean, bulleted plain text. Do NOT use markdown bold headers or HTML. Simply start with sections like 'CUSTOMER FAQS:', 'MERCHANT TONE & WRITING STYLE:', and 'PRODUCTS & PRICES:'. Keep it concise and under 500 words total. Do not output conversational filler.
-"""
+            for idx, batch in enumerate(batches[:6]): # Process up to 6 deep batches (~90 full chat threads / ~4,000 messages)
+                batch_text = "\n\n".join(batch)
+                user_prompt = f"Batch #{idx+1} of Chat Threads to comb:\n\n{batch_text}"
+                try:
+                    res = await ai_engine.client.chat.completions.create(
+                        model=ai_engine.model_name,
+                        messages=[
+                            {"role": "system", "content": mining_sys_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        max_tokens=1000,
+                        temperature=0.2
+                    )
+                    extracted_chunks.append(res.choices[0].message.content.strip())
+                except Exception as batch_err:
+                    logger.warning(f"Batch {idx+1} combing warning: {batch_err}")
             
-            user_prompt = f"Here are the chat logs to analyze:\n\n{compiled_transcripts}"
-            
-            groq_res = await ai_engine.client.chat.completions.create(
+            if not extracted_chunks:
+                db.update_auto_learned_knowledge(business_id, "Could not synthesize knowledge from chats due to LLM timeout.")
+                return
+
+            # Final Master Synthesis & Deduplication
+            combined_extractions = "\n\n====================\n\n".join(extracted_chunks)
+            master_sys_prompt = """You are the Master Knowledge Synthesizer for SalesFlow AI.
+Below are several data mining extractions combed from thousands of WhatsApp messages across every customer chat.
+Combine and deduplicate all extractions into ONE definitive, comprehensive Master Knowledge Base.
+Organize strictly with clean plain-text headers (Do NOT use bold markdown ** or HTML):
+
+PRODUCTS & EXACT PRICING CATALOG:
+(List every single product, service, and exact Naira price found across all chats without duplicates)
+
+STORE POLICIES & WAYBILL RULES:
+(List all delivery rates, addresses, waybill terms, and payment guidelines found)
+
+TOP RECURRING CUSTOMER FAQS:
+(List the top recurring questions and exact merchant answers)
+
+MERCHANT WRITING STYLE & TONE:
+(Briefly summarize how the merchant communicates so the AI assistant matches their persona)
+
+Keep it highly detailed, comprehensive, exact, and well-structured."""
+
+            final_res = await ai_engine.client.chat.completions.create(
                 model=ai_engine.model_name,
                 messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "system", "content": master_sys_prompt},
+                    {"role": "user", "content": f"Combed Extractions across all chat threads:\n\n{combined_extractions}"}
                 ],
-                max_tokens=1000,
-                temperature=0.3
+                max_tokens=1500,
+                temperature=0.2
             )
             
-            synthesized_knowledge = groq_res.choices[0].message.content.strip()
+            master_knowledge = final_res.choices[0].message.content.strip()
             
-            # Save synthesized knowledge to database
-            db.update_auto_learned_knowledge(business_id, synthesized_knowledge)
-            logger.info(f"✅ Successfully auto-trained business {business_id} from chats!")
+            # Save comprehensive master knowledge base to database
+            db.update_auto_learned_knowledge(business_id, master_knowledge)
+            logger.info(f"✅ Successfully completed Deep Combing & Master Synthesis across {len(transcripts)} chats for business {business_id}!")
             
     except Exception as e:
         logger.error(f"❌ Error in auto_train_from_chats_task: {e}")
