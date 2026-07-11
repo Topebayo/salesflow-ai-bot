@@ -1799,6 +1799,73 @@ async def update_order(request: Request, order_id: int, status: str = Query(...)
     return {"updated": updated, "order_id": order_id, "new_status": status}
 
 
+@app.post("/orders/{order_id}/send-whatsapp-receipt")
+@limiter.limit("20/minute")
+async def send_whatsapp_receipt(request: Request, order_id: int, business_id: Optional[str] = Query(None)):
+    """Automatically dispatch a stunning visual boxed receipt directly to the customer's WhatsApp DM via Evolution API."""
+    order = db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+        
+    biz_id = business_id or order.get("business_id")
+    if not biz_id:
+        raise HTTPException(status_code=400, detail="Business ID missing")
+        
+    creds = db.get_business_credentials(biz_id)
+    instance_name = creds.get("evolution_instance_name")
+    apikey = creds.get("evolution_apikey")
+    
+    if not instance_name or not apikey:
+        raise HTTPException(status_code=400, detail="WhatsApp device not connected via QR Code for this business")
+        
+    phone = order.get("phone_number", "")
+    clean_phone = ''.join(filter(str.isdigit, str(phone)))
+    if not clean_phone:
+        raise HTTPException(status_code=400, detail="Customer phone number missing or invalid")
+        
+    biz_config = db.get_business_config(biz_id)
+    biz_name = biz_config.get("name", "SalesFlow Business") if biz_config else "SalesFlow Business"
+    
+    created_str = str(order.get("created_at", "")).split("T")[0] or "Today"
+    cust_name = order.get("customer_name", "Valued Customer")
+    items_raw = order.get("items", "General Order")
+    items_lines = "\n".join([f"• {item.strip()}" for item in str(items_raw).split("\n") if item.strip()]) or f"• {items_raw}"
+    
+    amount_val = order.get("total_amount", 0)
+    try:
+        amount_str = f"₦{int(float(amount_val)):,}"
+    except (ValueError, TypeError):
+        amount_str = f"₦{amount_val}"
+        
+    status = str(order.get("status", "PAID")).upper()
+    
+    visual_receipt = f"""╔══════════════════════════════╗
+   🧾 *OFFICIAL DIGITAL RECEIPT*  
+╚══════════════════════════════╝
+
+🏪 *Merchant:* {biz_name}
+👤 *Customer:* {cust_name}
+📅 *Date:* {created_str}
+🔢 *Order Ref:* #SF-{order_id}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📦 *ITEMIZED BREAKDOWN:*
+{items_lines}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💰 *TOTAL AMOUNT:* {amount_str}
+✅ *STATUS:* {status}
+
+🔒 _Securely generated & verified by SalesFlow AI Engine._"""
+
+    success = await send_evolution_message(instance_name, apikey, clean_phone, visual_receipt, delay=1500)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to dispatch receipt via WhatsApp server")
+        
+    logger.info(f"📲 Visual Receipt for Order #{order_id} dispatched to {clean_phone} via WhatsApp!")
+    return {"sent": True, "order_id": order_id, "phone_number": clean_phone}
+
+
 @app.get("/handoffs")
 @limiter.limit("30/minute")
 async def get_handoffs(request: Request, business_id: Optional[str] = Query(None)):

@@ -229,6 +229,11 @@ class Database:
         res = self.client.table("orders").update({"status": status}).eq("id", order_id).execute()
         return len(res.data) > 0
 
+    def get_order_by_id(self, order_id: int) -> dict:
+        if not self.client: return {}
+        res = self.client.table("orders").select("*").eq("id", order_id).execute()
+        return res.data[0] if res.data else {}
+
     def get_revenue_stats(self, business_id: str = None) -> dict:
         if not self.client:
             return {"total_orders": 0, "total_revenue": 0, "orders_today": 0, "revenue_today": 0}
