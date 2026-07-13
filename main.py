@@ -2217,9 +2217,7 @@ async def send_evolution_message(
     }
     payload = {
         "number": recipient_phone,
-        "text": message_text,
-        "delay": delay,
-        "presence": "composing"
+        "text": message_text
     }
     
     try:
