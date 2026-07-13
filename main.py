@@ -2550,6 +2550,21 @@ async def handle_admin_add_product(
             else:
                 product_name = clean_text
                 
+        # Automatically format price with Naira sign if numeric or N/k notation
+        if re.search(r'\d', price_str) and not re.search(r'[a-zA-Z]', re.sub(r'[kKnN]', '', price_str)):
+            num_clean = re.sub(r'[^0-9.]', '', price_str)
+            try:
+                val = float(num_clean)
+                if 'k' in price_str.lower() and val < 10000:
+                    val *= 1000
+                price_str = f"₦{val:,.0f}" if val.is_integer() else f"₦{val:,.2f}"
+            except Exception:
+                if not price_str.startswith("₦") and not price_str.startswith("N"):
+                    price_str = f"₦{price_str}"
+        elif re.search(r'\d', price_str) and not price_str.startswith("₦"):
+            if price_str.lower().startswith("n") and re.search(r'^\s*[nN]\s*[\d,.]+', price_str):
+                price_str = "₦" + re.sub(r'^[nN]\s*', '', price_str)
+                
         # 3. Extract Image object (check inline or quoted message)
         image_obj = (
             message_obj.get("imageMessage") or
