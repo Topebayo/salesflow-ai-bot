@@ -2510,6 +2510,158 @@ async def transcribe_evolution_audio(audio_obj: dict, apikey: str, instance_name
         return ""
 
 
+async def handle_admin_add_product(
+    business_id: str,
+    phone_number: str,
+    message_obj: dict,
+    caption: str,
+    instance_name: str,
+    apikey: str,
+    message_id: str
+) -> bool:
+    """Helper to add product to database from an admin WhatsApp chat command (`#add name | price`)."""
+    try:
+        logger.info(f"Admin initiated WhatsApp product upload for business {business_id}: '{caption}'")
+        
+        # 1. Strip prefix
+        clean_text = caption
+        for p in ('#addproduct', '/addproduct', '+product', '#product', '#add', '/add'):
+            if clean_text.lower().startswith(p):
+                clean_text = clean_text[len(p):].strip()
+                break
+                
+        # 2. Extract Name and Price
+        product_name = "New Catalog Item"
+        price_str = "Contact for price"
+        
+        if "|" in clean_text:
+            parts = clean_text.split("|", 1)
+            product_name = parts[0].strip() or "New Catalog Item"
+            price_str = parts[1].strip() or "Contact for price"
+        elif " - " in clean_text:
+            parts = clean_text.split(" - ", 1)
+            product_name = parts[0].strip() or "New Catalog Item"
+            price_str = parts[1].strip() or "Contact for price"
+        elif clean_text:
+            match = re.search(r'\s+([₦Nn$\€\£]?\s*[\d,]+(?:\.\d{2})?k?K?)\s*$', clean_text)
+            if match:
+                price_str = match.group(1).strip()
+                product_name = clean_text[:match.start()].strip() or "New Catalog Item"
+            else:
+                product_name = clean_text
+                
+        # 3. Extract Image object (check inline or quoted message)
+        image_obj = (
+            message_obj.get("imageMessage") or
+            message_obj.get("ephemeralMessage", {}).get("message", {}).get("imageMessage") or
+            message_obj.get("viewOnceMessage", {}).get("message", {}).get("imageMessage") or
+            message_obj.get("viewOnceMessageV2", {}).get("message", {}).get("imageMessage")
+        )
+        if not image_obj:
+            context_info = (
+                message_obj.get("extendedTextMessage", {}).get("contextInfo") or
+                message_obj.get("conversation", {}).get("contextInfo") or {}
+            )
+            quoted = context_info.get("quotedMessage", {})
+            if quoted:
+                image_obj = (
+                    quoted.get("imageMessage") or
+                    quoted.get("ephemeralMessage", {}).get("message", {}).get("imageMessage") or
+                    quoted.get("viewOnceMessage", {}).get("message", {}).get("imageMessage")
+                )
+                if image_obj and not message_id:
+                    message_id = context_info.get("stanzaId", message_id)
+                    
+        public_url = ""
+        if image_obj:
+            logger.info("Extracting product image from WhatsApp payload...")
+            image_bytes = None
+            base64_data = image_obj.get("base64") or image_obj.get("base64Data")
+            if base64_data:
+                import base64
+                if "," in base64_data:
+                    base64_data = base64_data.split(",")[1]
+                image_bytes = base64.b64decode(base64_data)
+                
+            effective_apikey = apikey or EVOLUTION_API_GLOBAL_KEY
+            if not image_bytes and instance_name and message_id:
+                endpoint = f"{EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{instance_name}"
+                headers = {"apikey": effective_apikey}
+                payload = {"message": {"key": {"id": message_id}}, "convertToMp4": False}
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    res = await client.post(endpoint, json=payload, headers=headers)
+                    if res.status_code in [200, 201]:
+                        res_json = res.json()
+                        b64 = res_json.get("base64") or res_json.get("base64Data") or res_json.get("data")
+                        if isinstance(b64, str):
+                            import base64
+                            if "," in b64:
+                                b64 = b64.split(",")[1]
+                            image_bytes = base64.b64decode(b64)
+                            
+            if not image_bytes:
+                url = image_obj.get("url") or image_obj.get("mediaUrl") or image_obj.get("directPath")
+                if url and url.startswith("http") and ".enc" not in url and "mmg.whatsapp.net" not in url:
+                    if "localhost" in url or "127.0.0.1" in url:
+                        path_start = url.find("/media/")
+                        if path_start == -1:
+                            path_start = url.find("/instances/")
+                        if path_start != -1:
+                            url = f"{EVOLUTION_API_URL}{url[path_start:]}"
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        res = await client.get(url, headers={"apikey": effective_apikey})
+                        if res.status_code == 200:
+                            image_bytes = res.content
+                            
+            if image_bytes and db.client:
+                import time
+                timestamp = int(time.time() * 1000)
+                file_path = f"{business_id}/{timestamp}_chat_product.jpg"
+                try:
+                    db.client.storage.from_("product-images").upload(
+                        path=file_path,
+                        file=image_bytes,
+                        file_options={"content-type": "image/jpeg"}
+                    )
+                    public_url = db.client.storage.from_("product-images").get_public_url(file_path)
+                    logger.info(f"✅ Product image uploaded to storage: {public_url}")
+                except Exception as e_up:
+                    logger.error(f"❌ Storage upload failed during chat add: {e_up}")
+                    
+        # 4. Save to Database
+        import time
+        product_id = db.add_product(
+            business_id=business_id,
+            name=product_name,
+            description=f"Added directly via WhatsApp chat command on {time.strftime('%Y-%m-%d')}",
+            price=price_str,
+            image_url=public_url
+        )
+        
+        # 5. Send confirmation back to WhatsApp
+        if product_id:
+            msg = (
+                f"✅ *Product Added to Catalog!*\n\n"
+                f"📦 *Name:* {product_name}\n"
+                f"💰 *Price:* {price_str}\n"
+                f"🖼️ *Photo:* {'Uploaded & linked successfully' if public_url else 'No image attached'}\n\n"
+                f"✨ _Your AI brain has been updated instantly with this new item!_"
+            )
+        else:
+            msg = "❌ Failed to save product to database. Please verify your product catalog parameters."
+            
+        await send_evolution_message(
+            instance_name=instance_name,
+            apikey=apikey or EVOLUTION_API_GLOBAL_KEY,
+            recipient_phone=phone_number,
+            message_text=msg
+        )
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error handling admin add product: {e}")
+        return False
+
+
 @app.post("/webhook/evolution/{business_id}")
 async def handle_evolution_webhook(business_id: str, request: Request) -> JSONResponse:
     """
@@ -2543,12 +2695,34 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
             )
             
             if from_me:
-                # Intercept slash commands and #confirmed trigger to silently pause/resume AI or send receipts in-thread
-                clean_msg = message_body.strip().lower()
+                # Extract image caption if message_body is empty
+                image_obj_fm = (
+                    message_obj.get("imageMessage") or
+                    message_obj.get("ephemeralMessage", {}).get("message", {}).get("imageMessage") or
+                    message_obj.get("viewOnceMessage", {}).get("message", {}).get("imageMessage") or
+                    message_obj.get("viewOnceMessageV2", {}).get("message", {}).get("imageMessage")
+                )
+                caption_fm = image_obj_fm.get("caption", "") if image_obj_fm else ""
+                full_fm_text = (message_body or caption_fm).strip()
+                clean_msg = full_fm_text.lower()
                 creds = db.get_business_credentials(business_id)
                 instance_name = creds.get("evolution_instance_name", "")
-                apikey = creds.get("evolution_apikey", "")
+                apikey = creds.get("evolution_apikey", "") or EVOLUTION_API_GLOBAL_KEY
                 
+                if any(clean_msg.startswith(p) for p in ('#add', '#product', '/add', '+product', '#addproduct', '/addproduct')):
+                    if instance_name and apikey and remote_jid and message_id:
+                        await delete_evolution_message(instance_name, apikey, remote_jid, message_id)
+                    await handle_admin_add_product(
+                        business_id=business_id,
+                        phone_number=remote_jid.split("@")[0] if "@" in remote_jid else remote_jid,
+                        message_obj=message_obj,
+                        caption=full_fm_text,
+                        instance_name=instance_name,
+                        apikey=apikey,
+                        message_id=message_id
+                    )
+                    return JSONResponse(content={"status": "ok"}, status_code=200)
+
                 if clean_msg in ['#confirmed', '/confirmed', '#paid', '/paid', '#receipt', '/receipt']:
                     if instance_name and apikey and remote_jid and message_id:
                         await delete_evolution_message(instance_name, apikey, remote_jid, message_id)
@@ -2620,7 +2794,11 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
             document_obj = message_obj.get("documentMessage")
             
             if image_obj and not message_body:
-                message_body = "[IMAGE message received]"
+                caption_str = image_obj.get("caption", "") if image_obj else ""
+                if caption_str:
+                    message_body = caption_str
+                else:
+                    message_body = "[IMAGE message received]"
             elif video_obj and not message_body:
                 message_body = "[VIDEO message received]"
             elif document_obj and not message_body:
@@ -2676,6 +2854,21 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
                 if db.is_business_admin(business_id, phone_number):
                     logger.info(f"🎉 Admin triggered #confirmed receipt image via message for {phone_number}")
                     await trigger_confirmed_receipt_image(business_id, phone_number, creds.get("evolution_instance_name", ""), creds.get("evolution_apikey", ""))
+                return JSONResponse(content={"status": "ok"}, status_code=200)
+
+            # Check product upload command from admin (#add / #product)
+            if any(message_body.strip().lower().startswith(p) for p in ('#add', '#product', '/add', '+product', '#addproduct', '/addproduct')):
+                if db.is_business_admin(business_id, phone_number):
+                    creds = db.get_business_credentials(business_id)
+                    await handle_admin_add_product(
+                        business_id=business_id,
+                        phone_number=phone_number,
+                        message_obj=message_obj,
+                        caption=message_body.strip(),
+                        instance_name=creds.get("evolution_instance_name", ""),
+                        apikey=creds.get("evolution_apikey", "") or EVOLUTION_API_GLOBAL_KEY,
+                        message_id=key.get("id", "")
+                    )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
 
             # Check explicit slash commands for handoff / resume
