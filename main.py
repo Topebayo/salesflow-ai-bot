@@ -2603,6 +2603,28 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
                     message_body = transcription
                     is_voice_note = True
             
+            # Handle images and other media
+            image_obj = (
+                message_obj.get("imageMessage") or
+                message_obj.get("ephemeralMessage", {}).get("message", {}).get("imageMessage") or
+                message_obj.get("viewOnceMessage", {}).get("message", {}).get("imageMessage") or
+                message_obj.get("viewOnceMessageV2", {}).get("message", {}).get("imageMessage")
+            )
+            video_obj = (
+                message_obj.get("videoMessage") or
+                message_obj.get("ephemeralMessage", {}).get("message", {}).get("videoMessage") or
+                message_obj.get("viewOnceMessage", {}).get("message", {}).get("videoMessage") or
+                message_obj.get("viewOnceMessageV2", {}).get("message", {}).get("videoMessage")
+            )
+            document_obj = message_obj.get("documentMessage")
+            
+            if image_obj and not message_body:
+                message_body = "[IMAGE message received]"
+            elif video_obj and not message_body:
+                message_body = "[VIDEO message received]"
+            elif document_obj and not message_body:
+                message_body = "[DOCUMENT message received]"
+            
             if not message_body:
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
