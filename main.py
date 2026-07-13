@@ -2200,7 +2200,8 @@ async def send_evolution_message(
     instance_name: str,
     apikey: str,
     recipient_phone: str,
-    message_text: str
+    message_text: str,
+    delay: int = 2000
 ) -> bool:
     """
     Send a WhatsApp message via Evolution API.
@@ -2217,7 +2218,7 @@ async def send_evolution_message(
     payload = {
         "number": recipient_phone,
         "text": message_text,
-        "delay": 2000,
+        "delay": delay,
         "presence": "composing"
     }
     

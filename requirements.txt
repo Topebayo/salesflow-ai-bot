@@ -9,3 +9,5 @@ twilio>=9.10.0
 python-multipart
 supabase
 slowapi>=0.1.9
+pillow>=10.4.0
+
