@@ -801,8 +801,8 @@ async def extract_order_details_via_llm(business_id: str, phone_number: str, las
 async def _process_and_reply_meta(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
     """Background task: generate AI response, detect orders, then send via Meta Graph API."""
     try:
-        # Simulate human typing delay (15 seconds) so it doesn't look like a bot
-        await asyncio.sleep(15)
+        # Simulate human typing delay (2 seconds) so it doesn't look like a bot
+        await asyncio.sleep(2)
         
         # Get business credentials
         creds = db.get_business_credentials(business_id)
@@ -1057,8 +1057,8 @@ async def _send_twilio_message(phone_number: str, message: str, media_url: str =
 async def _process_and_reply_twilio(business_id: str, phone_number: str, user_message: str, profile_name: str = None):
     """Background task: generate AI response, detect orders, then send via Twilio REST API."""
     try:
-        # Simulate human typing delay (15 seconds)
-        await asyncio.sleep(15)
+        # Simulate human typing delay (2 seconds)
+        await asyncio.sleep(2)
 
         # Check message quota limit
         usage = db.get_business_usage(business_id)
@@ -2239,8 +2239,8 @@ async def send_evolution_message(
 async def _process_and_reply_evolution(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
     """Background task: generate AI response, then send via Evolution API."""
     try:
-        # Simulate human typing delay (15 seconds)
-        await asyncio.sleep(15)
+        # Simulate human typing delay (2 seconds)
+        await asyncio.sleep(2)
         
         # Get business credentials
         creds = db.get_business_credentials(business_id)
