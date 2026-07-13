@@ -2426,32 +2426,12 @@ async def transcribe_evolution_audio(audio_obj: dict, apikey: str, instance_name
             audio_bytes = base64.b64decode(base64_data)
             logger.info("🎙️ Decoded base64 audio data successfully from payload.")
             
-        # 2. Try URL download
-        if not audio_bytes:
-            url = audio_obj.get("url") or audio_obj.get("mediaUrl") or audio_obj.get("directPath")
-            if url and url.startswith("http"):
-                if "localhost" in url or "127.0.0.1" in url:
-                    path_start = url.find("/media/")
-                    if path_start == -1:
-                        path_start = url.find("/instances/")
-                    if path_start != -1:
-                        url = f"{EVOLUTION_API_URL}{url[path_start:]}"
-                        
-                logger.info(f"🎙️ Downloading audio from Evolution API URL: {url}")
-                headers = {"apikey": apikey}
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    res = await client.get(url, headers=headers)
-                    if res.status_code == 200:
-                        audio_bytes = res.content
-                        logger.info("🎙️ Audio downloaded successfully from URL.")
-                    else:
-                        logger.error(f"❌ Failed to download audio from {url}: status {res.status_code}")
-                        
-        # 3. Try Evolution API getBase64FromMediaMessage endpoint (when webhookBase64 is false)
+        # 2. Try Evolution API getBase64FromMediaMessage endpoint (decrypts .enc WhatsApp media to audio)
+        effective_apikey = apikey or EVOLUTION_API_GLOBAL_KEY
         if not audio_bytes and instance_name and message_id:
             logger.info(f"🎙️ Fetching base64 media via getBase64FromMediaMessage for message {message_id} on {instance_name}...")
             endpoint = f"{EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{instance_name}"
-            headers = {"apikey": apikey}
+            headers = {"apikey": effective_apikey}
             payload = {
                 "message": {
                     "key": {
@@ -2473,6 +2453,27 @@ async def transcribe_evolution_audio(audio_obj: dict, apikey: str, instance_name
                         logger.info("🎙️ Audio fetched and decoded via getBase64FromMediaMessage successfully.")
                 else:
                     logger.error(f"❌ getBase64FromMediaMessage failed: {res.status_code} - {res.text}")
+
+        # 3. Try URL download ONLY if getBase64FromMediaMessage failed and URL is not raw encrypted .enc CDN
+        if not audio_bytes:
+            url = audio_obj.get("url") or audio_obj.get("mediaUrl") or audio_obj.get("directPath")
+            if url and url.startswith("http") and ".enc" not in url and "mmg.whatsapp.net" not in url:
+                if "localhost" in url or "127.0.0.1" in url:
+                    path_start = url.find("/media/")
+                    if path_start == -1:
+                        path_start = url.find("/instances/")
+                    if path_start != -1:
+                        url = f"{EVOLUTION_API_URL}{url[path_start:]}"
+                        
+                logger.info(f"🎙️ Downloading audio from Evolution API URL: {url}")
+                headers = {"apikey": effective_apikey}
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    res = await client.get(url, headers=headers)
+                    if res.status_code == 200:
+                        audio_bytes = res.content
+                        logger.info("🎙️ Audio downloaded successfully from URL.")
+                    else:
+                        logger.error(f"❌ Failed to download audio from {url}: status {res.status_code}")
 
         if not audio_bytes:
             logger.error("❌ No audio data found to transcribe.")
@@ -2595,7 +2596,7 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
                 creds = db.get_business_credentials(business_id)
                 transcription = await transcribe_evolution_audio(
                     audio_obj=audio_obj,
-                    apikey=creds.get("evolution_apikey", ""),
+                    apikey=creds.get("evolution_apikey", "") or EVOLUTION_API_GLOBAL_KEY,
                     instance_name=creds.get("evolution_instance_name", ""),
                     message_id=key.get("id", "")
                 )
