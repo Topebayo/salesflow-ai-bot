@@ -2732,8 +2732,9 @@ async def create_evolution_instance(business_id: str, request: Request) -> JSONR
         )
     
     try:
-        # Generate a unique instance name based on business_id
-        instance_name = f"sf_{business_id[:8]}"
+        # Generate a unique instance name based on business_id and a random suffix to avoid session conflicts
+        import uuid
+        instance_name = f"sf_{business_id[:8]}_{uuid.uuid4().hex[:4]}"
         
         # Build the webhook URL for this business
         body_data = await request.json() if request.headers.get("content-type") == "application/json" else {}
