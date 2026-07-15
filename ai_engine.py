@@ -527,7 +527,8 @@ REMEMBER: You are a real person, not a robot. Keep it short, helpful, and natura
         business_id: str,
         phone_number: str,
         user_message: str,
-        save_user_message: bool = True
+        save_user_message: bool = True,
+        base64_image: Optional[str] = None
     ) -> Optional[str]:
         """
         Generate an AI response for a user message.
@@ -604,13 +605,27 @@ CRITICAL RULES:
                 for msg in history:
                     messages.append({"role": msg["role"], "content": msg["content"]})
                     
-            messages.append({"role": "user", "content": user_message})
+            # If image is present, format content array for vision and use vision model
+            if base64_image:
+                user_content = [
+                    {"type": "text", "text": user_message},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                ]
+                messages.append({"role": "user", "content": user_content})
+                model_to_use = "llama-3.2-11b-vision-preview"
+                
+                # Vision models often need higher token limits for detailed descriptions
+                max_tokens = 500 
+            else:
+                messages.append({"role": "user", "content": user_message})
+                model_to_use = self.model_name
+                max_tokens = 300
             
             response = await self.client.chat.completions.create(
-                model=self.model_name,
+                model=model_to_use,
                 messages=messages,
                 temperature=0.7,
-                max_tokens=300,
+                max_tokens=max_tokens,
             )
             return response.choices[0].message.content
         except Exception as e:

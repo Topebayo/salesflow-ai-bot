@@ -2234,7 +2234,7 @@ async def send_evolution_message(
         return False
 
 
-async def _process_and_reply_evolution(business_id: str, phone_number: str, message_body: str, sender_name: str = None):
+async def _process_and_reply_evolution(business_id: str, phone_number: str, message_body: str, sender_name: str = None, base64_image: str = None):
     """Background task: generate AI response, then send via Evolution API."""
     try:
         # Simulate human typing delay (2 seconds)
@@ -2270,7 +2270,8 @@ async def _process_and_reply_evolution(business_id: str, phone_number: str, mess
             business_id=business_id,
             phone_number=phone_number,
             user_message=message_body,
-            save_user_message=False
+            save_user_message=False,
+            base64_image=base64_image
         )
         
         if ai_response:
@@ -2806,18 +2807,45 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
             )
             document_obj = message_obj.get("documentMessage")
             
-            if image_obj and not message_body:
-                caption_str = image_obj.get("caption", "") if image_obj else ""
-                if caption_str:
-                    message_body = caption_str
-                else:
-                    message_body = "[IMAGE message received]"
+            customer_base64_image = None
+            if image_obj:
+                caption_str = image_obj.get("caption", "")
+                message_body = caption_str if caption_str else "[IMAGE message received]"
+                
+                # Fetch base64 image for Groq Vision
+                creds = db.get_business_credentials(business_id)
+                effective_apikey = creds.get("evolution_apikey") or EVOLUTION_API_GLOBAL_KEY
+                instance_name = creds.get("evolution_instance_name", "")
+                message_id = key.get("id", "")
+                
+                base64_data = image_obj.get("base64") or image_obj.get("base64Data")
+                if base64_data:
+                    if "," in base64_data:
+                        base64_data = base64_data.split(",")[1]
+                    customer_base64_image = base64_data
+                elif instance_name and message_id:
+                    try:
+                        endpoint = f"{EVOLUTION_API_URL}/chat/getBase64FromMediaMessage/{instance_name}"
+                        headers = {"apikey": effective_apikey}
+                        payload = {"message": {"key": {"id": message_id}}, "convertToMp4": False}
+                        async with httpx.AsyncClient(timeout=20.0) as client:
+                            res = await client.post(endpoint, json=payload, headers=headers)
+                            if res.status_code in [200, 201]:
+                                res_json = res.json()
+                                b64 = res_json.get("base64") or res_json.get("base64Data") or res_json.get("data")
+                                if isinstance(b64, str):
+                                    if "," in b64:
+                                        b64 = b64.split(",")[1]
+                                    customer_base64_image = b64
+                    except Exception as e:
+                        logger.error(f"Error fetching image base64 for Vision: {e}")
+
             elif video_obj and not message_body:
                 message_body = "[VIDEO message received]"
             elif document_obj and not message_body:
                 message_body = "[DOCUMENT message received]"
             
-            if not message_body:
+            if not message_body and not customer_base64_image:
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             
             sender_name = data.get("pushName", "")
@@ -2931,7 +2959,7 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
             
             # Process AI reply in background task
             asyncio.create_task(_process_and_reply_evolution(
-                business_id, phone_number, message_body, sender_name
+                business_id, phone_number, message_body, sender_name, customer_base64_image
             ))
         
         elif event == "connection.update":
