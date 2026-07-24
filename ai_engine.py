@@ -270,7 +270,7 @@ CRITICAL RULES:
 
         if bot_mode == "real_estate":
             prompt += """
-REAL ESTATE QUALIFICATION FLOW:
+REAL ESTATE QUALIFICATION & BOOKING FLOW:
 1. When chatting with a new customer, dynamically qualify their needs by asking for:
    - Their budget range (e.g. 50 Million, 100M, etc.)
    - Their preferred location or neighborhood
@@ -281,7 +281,24 @@ REAL ESTATE QUALIFICATION FLOW:
    - If they say: "I have 50 million to 60 million and want to buy in Lekki", append: [QUALIFY: budget=50M-60M, location=Lekki]
    - If they only state location: "I want a flat in Ikeja", append: [QUALIFY: budget=, location=Ikeja]
    - If they only state budget: "My budget is 80 Million", append: [QUALIFY: budget=80M-80M, location=]
-   Always keep the values simple (e.g., use 'M' for Millions). Ensure you include the brackets [ ] and the exact 'QUALIFY' keyword. This tag is hidden from the customer but helps update the agent dashboard.
+   Always keep the values simple (e.g., use 'M' for Millions). Ensure you include the brackets [ ] and the exact 'QUALIFY' keyword.
+4. INSPECTION BOOKING: Once a customer is qualified and shows interest in a specific property, politely push them to schedule a physical or virtual inspection.
+5. Once an inspection date or time is agreed upon, append this exact hidden tag:
+   [INSPECTION_BOOKED: property=NAME, time=TIME]
+   Example: [INSPECTION_BOOKED: property=4 Bed Duplex Lekki, time=Tomorrow 2PM]
+   This tag is hidden from the customer but alerts the dashboard.
+"""
+        elif bot_mode == "retail":
+            prompt += """
+RETAIL CHECKOUT FLOW:
+1. Answer product questions and recommend items.
+2. If the customer indicates they want to buy or order something, you MUST first ask for their delivery address. Do NOT send bank details until you have their address.
+3. Once they provide their delivery address, send them the payment details.
+4. When you have collected their order items and delivery address and given them the payment details, you MUST append a hidden order tag at the very end of your response using this exact format:
+   [ORDER_READY: items=ITEM NAMES, total=TOTAL_PRICE, address=ADDRESS]
+   Example:
+   [ORDER_READY: items=2x Nike Shoes, total=45000, address=12 Admiralty Way Lekki]
+   This tag is hidden from the customer but triggers the system to perfectly log the order to the merchant's dashboard.
 """
 
         if greeting:
@@ -299,6 +316,8 @@ ABOUT THE BUSINESS: {description}
             prompt += f"""
 ADDITIONAL BUSINESS KNOWLEDGE & FAQS (AUTO-LEARNT FROM HISTORICAL CHATS):
 {auto_learned_knowledge}
+
+IMPORTANT: The rules in [STRICT BUSINESS RULES] above are absolute laws. If they conflict with your general assumptions, the STRICT BUSINESS RULES always win. However, if any product prices mentioned in the 'VISUAL PRODUCT CATALOG' below conflict with the auto-learned knowledge, the VISUAL PRODUCT CATALOG prices take ultimate priority, as they are live from the dashboard.
 """
 
         # Fetch products from database if business_id is provided

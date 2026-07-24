@@ -690,42 +690,54 @@ async def handle_webhook(request: Request) -> JSONResponse:
         return JSONResponse(content={"status": "ok"}, status_code=200)
 
 
-def process_qualification_tags(business_id: str, phone_number: str, response_text: str) -> str:
+def process_ai_action_tags(business_id: str, phone_number: str, response_text: str, customer_name: str = "Unknown") -> str:
     """
-    Parses dynamic qualification tags [QUALIFY: budget=MIN-MAX, location=NAME] from the AI's response,
-    saves the fields to the contacts database, and removes the tag from the final message.
+    Parses dynamic tags [QUALIFY...], [ORDER_READY...], [INSPECTION_BOOKED...] from the AI's response,
+    saves the fields to the database, and removes the tags from the final message.
     """
     if not response_text:
         return response_text
         
-    match = re.search(r'\[QUALIFY:\s*budget=([^,]*),\s*location=([^\]]*)\]', response_text)
-    if match:
-        budget_raw = match.group(1).strip()
-        location_raw = match.group(2).strip()
+    # 1. Qualify Tag
+    qualify_match = re.search(r'\[QUALIFY:\s*budget=([^,]*),\s*location=([^\]]*)\]', response_text)
+    if qualify_match:
+        budget_raw = qualify_match.group(1).strip()
+        location_raw = qualify_match.group(2).strip()
         
-        # Parse budgets
-        budget_min = ""
-        budget_max = ""
+        budget_min, budget_max = "", ""
         if budget_raw:
             parts = budget_raw.split('-')
             if len(parts) == 2:
-                budget_min = parts[0].strip()
-                budget_max = parts[1].strip()
+                budget_min, budget_max = parts[0].strip(), parts[1].strip()
             else:
-                budget_min = budget_raw.strip()
-                budget_max = budget_raw.strip()
+                budget_min, budget_max = budget_raw.strip(), budget_raw.strip()
                 
-        # Save to database
-        db.qualify_lead(
-            business_id=business_id,
-            phone_number=phone_number,
-            budget_min=budget_min,
-            budget_max=budget_max,
-            preferred_location=location_raw
-        )
-        
-        # Strip the tag from the text
+        db.qualify_lead(business_id=business_id, phone_number=phone_number, budget_min=budget_min, budget_max=budget_max, preferred_location=location_raw)
         response_text = re.sub(r'\[QUALIFY:[^\]]*\]', '', response_text).strip()
+        
+    # 2. Inspection Booked Tag
+    inspect_match = re.search(r'\[INSPECTION_BOOKED:\s*property=([^,]*),\s*time=([^\]]*)\]', response_text)
+    if inspect_match:
+        prop_name = inspect_match.group(1).strip()
+        time_str = inspect_match.group(2).strip()
+        db.qualify_lead(business_id=business_id, phone_number=phone_number, search_status=f"Inspection booked: {prop_name} at {time_str}")
+        logger.info(f"📅 Inspection booked for {phone_number}: {prop_name} at {time_str}")
+        response_text = re.sub(r'\[INSPECTION_BOOKED:[^\]]*\]', '', response_text).strip()
+
+    # 3. Order Ready Tag
+    order_match = re.search(r'\[ORDER_READY:\s*items=([^,]*),\s*total=([^,]*),\s*address=([^\]]*)\]', response_text)
+    if order_match:
+        items = order_match.group(1).strip()
+        total_str = order_match.group(2).strip()
+        address = order_match.group(3).strip()
+        
+        try:
+            total = int(re.sub(r'[^\d]', '', total_str))
+        except ValueError:
+            total = 0
+            
+        db.save_order(business_id=business_id, phone_number=phone_number, customer_name=customer_name, items=items, total_amount=total, delivery_address=address)
+        response_text = re.sub(r'\[ORDER_READY:[^\]]*\]', '', response_text).strip()
         
     return response_text
 
@@ -835,39 +847,21 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
         
         if ai_response:
             db.increment_message_usage(business_id)
-            # Process real estate lead qualification tags
-            ai_response = process_qualification_tags(business_id, phone_number, ai_response)
-            
-            # Check for AI-triggered handoff
-            if "[HANDOFF_TRIGGERED]" in ai_response:
-                ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
-                db.set_human_handoff(business_id, phone_number, True)
-                logger.info(f"🙋 AI triggered human handoff for {phone_number}")
+            # Process all AI action tags (Qualify, Orders, Inspections)
 
-            # Dynamic Order Detection (Component 5)
-            business_config = db.get_business_config(business_id)
-            payment_info = business_config.get("payment_info", "")
+            ai_response = process_ai_action_tags(business_id if 'business_id' in locals() else req.business_id, phone_number if 'phone_number' in locals() else phone, ai_response, sender_name if sender_name else 'Unknown')
+
             
-            # Default fallback payment detection keywords
-            payment_keywords = ["bank", "transfer", "opay", "account", "payment", "pay", "8137048851"]
-            if payment_info:
-                payment_keywords.extend([w.lower() for w in payment_info.split() if len(w) > 3])
-                
-            if any(keyword in ai_response.lower() for keyword in payment_keywords) and ("account" in ai_response.lower() or "number" in ai_response.lower() or "pay" in ai_response.lower() or "transfer" in ai_response.lower()):
-                try:
-                    customer_name = sender_name if sender_name else "Unknown"
-                    order_details = await extract_order_details_via_llm(business_id, phone_number, message_body)
-                    db.save_order(
-                        business_id=business_id,
-                        phone_number=phone_number,
-                        customer_name=customer_name,
-                        items=order_details["items"],
-                        total_amount=order_details["total_amount"],
-                        delivery_address=order_details["delivery_address"]
-                    )
-                    logger.info(f"📦 Order auto-detected and extracted for {phone_number}: {order_details}")
-                except Exception as e:
-                    logger.error(f"Error saving order: {e}")
+
+            # Check for AI-triggered handoff
+
+            if "[HANDOFF_TRIGGERED]" in ai_response:
+
+                ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+
+                db.set_human_handoff(business_id if 'business_id' in locals() else req.business_id, phone_number if 'phone_number' in locals() else phone, True)
+
+                logger.info(f"🙋 AI triggered human handoff")
 
             # Extract [IMAGE:product_id] tokens (Component 6)
             image_tokens = re.findall(r'\[IMAGE:([a-zA-Z0-9\-]+)\]', ai_response)
@@ -1112,40 +1106,21 @@ async def _process_and_reply_twilio(business_id: str, phone_number: str, user_me
             ai_response = "sorry, something went wrong on my end. please try again"
         else:
             db.increment_message_usage(business_id)
-            # Process real estate lead qualification tags
-            ai_response = process_qualification_tags(business_id, phone_number, ai_response)
+            # Process all AI action tags (Qualify, Orders, Inspections)
 
-        # Check for AI-triggered handoff
-        if "[HANDOFF_TRIGGERED]" in ai_response:
-            ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
-            db.set_human_handoff(business_id, phone_number, True)
-            logger.info(f"🙋 AI triggered human handoff for {phone_number}")
+            ai_response = process_ai_action_tags(business_id if 'business_id' in locals() else req.business_id, phone_number if 'phone_number' in locals() else phone, ai_response, profile_name if profile_name else 'Unknown')
 
-        # Detect if AI is sending payment details (order confirmation)
-        business_config = db.get_business_config(business_id)
-        payment_info = business_config.get("payment_info", "")
-        
-        # Default fallback payment detection keywords
-        payment_keywords = ["bank", "transfer", "opay", "account", "payment", "pay", "8137048851"]
-        if payment_info:
-            payment_keywords.extend([w.lower() for w in payment_info.split() if len(w) > 3])
             
-        if any(keyword in ai_response.lower() for keyword in payment_keywords) and ("account" in ai_response.lower() or "number" in ai_response.lower() or "pay" in ai_response.lower() or "transfer" in ai_response.lower()):
-            # Try to extract order info from conversation
-            try:
-                customer_name = profile_name or "Unknown"
-                order_details = await extract_order_details_via_llm(business_id, phone_number, user_message)
-                db.save_order(
-                    business_id=business_id,
-                    phone_number=phone_number,
-                    customer_name=customer_name,
-                    items=order_details["items"],
-                    total_amount=order_details["total_amount"],
-                    delivery_address=order_details["delivery_address"]
-                )
-                logger.info(f"📦 Order auto-detected and extracted for {phone_number}: {order_details}")
-            except Exception as e:
-                logger.error(f"Error saving order: {e}")
+
+            # Check for AI-triggered handoff
+
+            if "[HANDOFF_TRIGGERED]" in ai_response:
+
+                ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+
+                db.set_human_handoff(business_id if 'business_id' in locals() else req.business_id, phone_number if 'phone_number' in locals() else phone, True)
+
+                logger.info(f"🙋 AI triggered human handoff")
 
         # Extract [IMAGE:product_id] tokens (Symmetrical to Meta webhook)
         image_tokens = re.findall(r'\[IMAGE:([a-zA-Z0-9\-]+)\]', ai_response)
@@ -1438,19 +1413,16 @@ Be literal and exact. Do NOT make up prices. Format strictly as clean plain text
             master_sys_prompt = """You are the Master Knowledge Synthesizer for SalesFlow AI.
 Below are several data mining extractions combed from thousands of WhatsApp messages across every customer chat.
 Combine and deduplicate all extractions into ONE definitive, comprehensive Master Knowledge Base.
-Organize strictly with clean plain-text headers (Do NOT use bold markdown ** or HTML):
+Organize strictly using these exact section headers:
 
-PRODUCTS & EXACT PRICING CATALOG:
-(List every single product, service, and exact Naira price found across all chats without duplicates)
+[STRICT BUSINESS RULES]
+(List all delivery rates, hard policies, minimum orders, and payment guidelines found. These will be strictly enforced.)
 
-STORE POLICIES & WAYBILL RULES:
-(List all delivery rates, addresses, waybill terms, and payment guidelines found)
+[NUANCED PRODUCT KNOWLEDGE]
+(List every single product, service, variation, and exact Naira price found. Describe how the merchant explains them.)
 
-TOP RECURRING CUSTOMER FAQS:
+[EXACT FAQ ANSWERS]
 (List the top recurring questions and exact merchant answers)
-
-MERCHANT WRITING STYLE & TONE:
-(Briefly summarize how the merchant communicates so the AI assistant matches their persona)
 
 Keep it highly detailed, comprehensive, exact, and well-structured."""
 
@@ -1659,16 +1631,28 @@ async def trigger_ai_response(phone: str, req: TriggerAIRequest, request: Reques
     if not ai_response:
         raise HTTPException(status_code=500, detail="AI engine failed to generate response")
         
-    # Process real estate lead qualification tags
-    ai_response = process_qualification_tags(req.business_id, phone, ai_response)
+    # Process all AI action tags (Qualify, Orders, Inspections)
+
+        
+    ai_response = process_ai_action_tags(business_id if 'business_id' in locals() else req.business_id, phone_number if 'phone_number' in locals() else phone, ai_response, "Unknown")
+
+        
+    
+
         
     # Check for AI-triggered handoff
-    if "[HANDOFF_TRIGGERED]" in ai_response:
-        ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
-        db.set_human_handoff(req.business_id, phone, True)
-        logger.info(f"🙋 AI triggered human handoff during manual trigger for {phone}")
+
         
-    # Send the response via WhatsApp
+    if "[HANDOFF_TRIGGERED]" in ai_response:
+
+        
+        ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+
+        
+        db.set_human_handoff(business_id if 'business_id' in locals() else req.business_id, phone_number if 'phone_number' in locals() else phone, True)
+
+        
+        logger.info(f"🙋 AI triggered human handoff")# Send the response via WhatsApp
     creds = db.get_business_credentials(req.business_id)
     provider = creds.get("whatsapp_provider", "meta")
     
@@ -2302,40 +2286,21 @@ async def _process_and_reply_evolution(business_id: str, phone_number: str, mess
         
         if ai_response:
             db.increment_message_usage(business_id)
-            # Process real estate lead qualification tags
-            ai_response = process_qualification_tags(business_id, phone_number, ai_response)
-            
-            # Check for AI-triggered handoff
-            if "[HANDOFF_TRIGGERED]" in ai_response:
-                ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
-                db.set_human_handoff(business_id, phone_number, True)
-                logger.info(f"AI triggered human handoff for {phone_number}")
+            # Process all AI action tags (Qualify, Orders, Inspections)
 
-            # Dynamic Order Detection
-            business_config = db.get_business_config(business_id)
-            payment_info = business_config.get("payment_info", "")
-            payment_keywords = ["bank", "transfer", "opay", "account", "payment", "pay"]
-            if payment_info:
-                payment_keywords.extend([w.lower() for w in payment_info.split() if len(w) > 3])
-                
-            if any(keyword in ai_response.lower() for keyword in payment_keywords) and (
-                "account" in ai_response.lower() or "number" in ai_response.lower() or 
-                "pay" in ai_response.lower() or "transfer" in ai_response.lower()
-            ):
-                try:
-                    customer_name = sender_name if sender_name else "Unknown"
-                    order_details = await extract_order_details_via_llm(business_id, phone_number, message_body)
-                    db.save_order(
-                        business_id=business_id,
-                        phone_number=phone_number,
-                        customer_name=customer_name,
-                        items=order_details["items"],
-                        total_amount=order_details["total_amount"],
-                        delivery_address=order_details["delivery_address"]
-                    )
-                    logger.info(f"📦 Order auto-detected and extracted for {phone_number}: {order_details}")
-                except Exception as e:
-                    logger.error(f"Error saving order: {e}")
+            ai_response = process_ai_action_tags(business_id if 'business_id' in locals() else req.business_id, phone_number if 'phone_number' in locals() else phone, ai_response, sender_name if sender_name else 'Unknown')
+
+            
+
+            # Check for AI-triggered handoff
+
+            if "[HANDOFF_TRIGGERED]" in ai_response:
+
+                ai_response = ai_response.replace("[HANDOFF_TRIGGERED]", "").strip()
+
+                db.set_human_handoff(business_id if 'business_id' in locals() else req.business_id, phone_number if 'phone_number' in locals() else phone, True)
+
+                logger.info(f"🙋 AI triggered human handoff")
 
             # Extract [IMAGE:product_id] tokens
             image_tokens = re.findall(r'\[IMAGE:([a-zA-Z0-9\-]+)\]', ai_response)
@@ -2733,6 +2698,12 @@ async def handle_evolution_webhook(business_id: str, request: Request) -> JSONRe
             key = data.get("key", {})
             from_me = key.get("fromMe", False)
             remote_jid = key.get("remoteJid", "")
+            
+            # IGNORE GROUP MESSAGES
+            if "@g.us" in remote_jid:
+                logger.info(f"Ignoring group message from {remote_jid} for business {business_id}")
+                return JSONResponse(status_code=200, content={"status": "ignored", "reason": "group_message"})
+                
             message_id = key.get("id", "")
             phone_number = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
             
