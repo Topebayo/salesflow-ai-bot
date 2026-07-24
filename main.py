@@ -932,8 +932,11 @@ async def _process_and_reply_meta(business_id: str, phone_number: str, message_b
 async def handle_twilio_webhook(
     From: str = Form(...),
     To: str = Form(...),
-    Body: str = Form(...),
-    ProfileName: str = Form(None)
+    Body: str = Form(""),
+    ProfileName: str = Form(None),
+    NumMedia: int = Form(0),
+    MediaUrl0: str = Form(None),
+    MediaContentType0: str = Form(None)
 ) -> PlainTextResponse:
     """
     Twilio WhatsApp Webhook Handler.
@@ -945,6 +948,29 @@ async def handle_twilio_webhook(
     phone_number = From.replace("whatsapp:", "")
     to_number = To.replace("whatsapp:", "")
     logger.info(f"📨 Received Twilio message from {phone_number} to {to_number}: {Body[:50]}...")
+
+    # --- HANDLE TWILIO VOICE NOTES ---
+    if NumMedia > 0 and MediaContentType0 and MediaContentType0.startswith("audio/"):
+        logger.info(f"🎙️ Received Twilio voice note from {phone_number}: {MediaUrl0}")
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+                res = await client.get(MediaUrl0, auth=auth)
+                if res.status_code == 200:
+                    audio_bytes = res.content
+                    ext = "ogg"
+                    if "mp3" in MediaContentType0: ext = "mp3"
+                    elif "mp4" in MediaContentType0: ext = "mp4"
+                    elif "wav" in MediaContentType0: ext = "wav"
+                    
+                    transcription = await transcribe_audio_with_groq(audio_bytes, f"twilio_voice.{ext}", MediaContentType0)
+                    if transcription:
+                        Body = transcription
+                        logger.info(f"🎙️ Twilio Body updated to transcription: {Body}")
+                else:
+                    logger.error(f"❌ Failed to download Twilio audio. Status: {res.status_code}")
+        except Exception as e:
+            logger.error(f"❌ Error processing Twilio voice note: {e}")
 
     # --- SANDBOX MULTI-TENANT SWITCHER ---
     # Because Twilio Sandbox shares one number, we allow developers to switch the active business via a command
@@ -2410,6 +2436,26 @@ async def delete_evolution_message(
         return False
 
 
+async def transcribe_audio_with_groq(audio_bytes: bytes, filename: str, mimetype: str) -> str:
+    """Helper to send audio bytes to Groq Whisper with a highly contextualized Nigerian Pidgin prompt."""
+    import io
+    logger.info(f"🎙️ Sending {len(audio_bytes)} bytes of {mimetype} to Groq Whisper...")
+    pidgin_prompt = "This is a voice note from a Nigerian customer. They may speak in Nigerian Pidgin English, Yoruba, or Igbo. Common words: Wahala, abeg, omo, naija, 50k, 100k, transfer, ehen, wetin, how far, biko, sure, na, dey, nawa, sha, sef."
+    try:
+        transcription = await ai_engine.client.audio.transcriptions.create(
+            file=(filename, io.BytesIO(audio_bytes)),
+            model="whisper-large-v3",
+            prompt=pidgin_prompt,
+            response_format="text"
+        )
+        text = transcription.strip() if isinstance(transcription, str) else getattr(transcription, 'text', '').strip()
+        logger.info(f"🎙️ Transcribed voice note: '{text}'")
+        return text
+    except Exception as e:
+        logger.error(f"❌ Error in Groq Whisper transcription: {e}")
+        return ""
+
+
 async def transcribe_evolution_audio(audio_obj: dict, apikey: str, instance_name: str = "", message_id: str = "") -> str:
     """Download audio message from Evolution API and transcribe it using Groq Whisper."""
     try:
@@ -2491,18 +2537,8 @@ async def transcribe_evolution_audio(audio_obj: dict, apikey: str, instance_name
             
         filename = f"voice_note.{ext}"
         
-        # 4. Transcribe using Groq Whisper API
-        import io
-        logger.info(f"🎙️ Sending {len(audio_bytes)} bytes of {mimetype} to Groq Whisper...")
-        transcription = await ai_engine.client.audio.transcriptions.create(
-            file=(filename, io.BytesIO(audio_bytes)),
-            model="whisper-large-v3",
-            response_format="text"
-        )
-        
-        text = transcription.strip() if isinstance(transcription, str) else getattr(transcription, 'text', '').strip()
-        logger.info(f"🎙️ Transcribed voice note: '{text}'")
-        return text
+        # 5. Transcribe using Groq Whisper API helper
+        return await transcribe_audio_with_groq(audio_bytes, filename, mimetype)
         
     except Exception as e:
         logger.error(f"❌ Error transcribing Evolution audio: {e}")
