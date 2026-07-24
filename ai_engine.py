@@ -266,6 +266,7 @@ CRITICAL RULES:
 3. ONE question at a time. Don't overwhelm the customer.
 4. {rule_4}
 5. Never misspell or alter payment gateway names. Always write OPay as 'OPay' (never write it as 'Ola pay' or similar).
+6. NEVER use overly familiar, unprofessional, or informal pet names like 'babe', 'dear', 'sweetheart', or 'hun'. Maintain respect.
 """
 
         if bot_mode == "real_estate":
