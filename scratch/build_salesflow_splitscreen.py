@@ -15,6 +15,7 @@ html_content = """<!DOCTYPE html>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script>
         tailwind.config = {
+            darkMode: 'class',
             theme: {
                 extend: {
                     fontFamily: {
@@ -131,7 +132,7 @@ html_content = """<!DOCTYPE html>
         <!-- Right Side: LIGHT GREEN Backdrop with Live Demo Card -->
         <div class="w-full lg:w-1/2 bg-lightgreen relative min-h-[420px] sm:min-h-[500px] lg:min-h-screen flex items-center justify-center p-4 sm:p-8 lg:p-12 xl:p-16">
             <!-- Decorative geometric shapes -->
-            <div class="absolute top-0 right-0 w-[600px] h-[600px] bg-brandgreen opacity-10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/3"></div>
+            <div class="hidden lg:block absolute top-0 right-0 w-[600px] h-[600px] bg-brandgreen opacity-10 rounded-full blur-3xl -translate-y-1/2 translate-x-1/3"></div>
             
             <!-- Live Demo Chat Card (Replaces Photo) -->
             <div class="relative z-10 w-full max-w-md lg:max-w-lg bg-white rounded-2xl border border-gray-200/80 shadow-2xl overflow-hidden">
