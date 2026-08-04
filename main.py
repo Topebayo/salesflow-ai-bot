@@ -1268,7 +1268,9 @@ async def handle_paystack_webhook(request: Request):
             monthly_limit = int(metadata.get("monthly_limit", 2000))
             
             # Map plan names if needed
-            if plan_type == "professional":
+            if plan_type == "starter":
+                monthly_limit = 500
+            elif plan_type == "professional":
                 monthly_limit = 2000
             elif plan_type == "enterprise":
                 monthly_limit = 1000000

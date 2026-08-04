@@ -255,7 +255,7 @@ html_content = """<!DOCTYPE html>
                         <h3 class="font-display text-2xl font-bold text-gray-900 dark:text-white mb-2">Starter</h3>
                         <p class="text-gray-500 dark:text-gray-400 text-xs mb-6">Perfect for small merchants getting started</p>
                         <div class="mb-6">
-                            <span class="text-3xl font-extrabold text-gray-900 dark:text-white">₦75,000</span>
+                            <span class="text-3xl font-extrabold text-gray-900 dark:text-white">₦50,000</span>
                             <span class="text-gray-500 text-sm">/month</span>
                         </div>
                         <ul class="space-y-3 text-sm text-gray-600 dark:text-gray-400 mb-8">
@@ -265,7 +265,7 @@ html_content = """<!DOCTYPE html>
                             <li class="flex items-center gap-2"><i class="fa-solid fa-check text-brandgreen"></i> Standard analytics</li>
                         </ul>
                     </div>
-                    <button onclick="openPaystackCheckout('starter', 7500000)" class="w-full py-3 rounded-xl bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-semibold text-sm hover:opacity-90 transition-opacity">⚡ Pay & Start</button>
+                    <button onclick="openPaystackCheckout('starter', 5000000)" class="w-full py-3 rounded-xl bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-semibold text-sm hover:opacity-90 transition-opacity">⚡ Pay & Start</button>
                 </div>
                 <!-- Professional -->
                 <div class="p-8 rounded-2xl bg-white dark:bg-gray-950 border-2 border-brandgreen relative flex flex-col justify-between shadow-xl">
@@ -274,7 +274,7 @@ html_content = """<!DOCTYPE html>
                         <h3 class="font-display text-2xl font-bold text-gray-900 dark:text-white mb-2">Professional</h3>
                         <p class="text-gray-500 dark:text-gray-400 text-xs mb-6">For growing businesses scaling sales</p>
                         <div class="mb-6">
-                            <span class="text-3xl font-extrabold text-gray-900 dark:text-white">₦150,000</span>
+                            <span class="text-3xl font-extrabold text-gray-900 dark:text-white">₦75,000</span>
                             <span class="text-gray-500 text-sm">/month</span>
                         </div>
                         <ul class="space-y-3 text-sm text-gray-600 dark:text-gray-400 mb-8">
@@ -285,7 +285,7 @@ html_content = """<!DOCTYPE html>
                             <li class="flex items-center gap-2"><i class="fa-solid fa-check text-brandgreen"></i> Priority Support</li>
                         </ul>
                     </div>
-                    <button onclick="openPaystackCheckout('professional', 15000000)" class="w-full py-3 rounded-xl bg-brandgreen text-white font-semibold text-sm hover:bg-brandgreen/90 transition-colors shadow-md">⚡ Pay & Start</button>
+                    <button onclick="openPaystackCheckout('professional', 7500000)" class="w-full py-3 rounded-xl bg-brandgreen text-white font-semibold text-sm hover:bg-brandgreen/90 transition-colors shadow-md">⚡ Pay & Start</button>
                 </div>
                 <!-- Enterprise -->
                 <div class="p-8 rounded-2xl bg-offwhite dark:bg-gray-950 border border-gray-200 dark:border-gray-800 flex flex-col justify-between">
@@ -293,7 +293,7 @@ html_content = """<!DOCTYPE html>
                         <h3 class="font-display text-2xl font-bold text-gray-900 dark:text-white mb-2">Enterprise</h3>
                         <p class="text-gray-500 dark:text-gray-400 text-xs mb-6">High volume merchants & real estate</p>
                         <div class="mb-6">
-                            <span class="text-3xl font-extrabold text-gray-900 dark:text-white">₦350,000</span>
+                            <span class="text-3xl font-extrabold text-gray-900 dark:text-white">₦200,000</span>
                             <span class="text-gray-500 text-sm">/month</span>
                         </div>
                         <ul class="space-y-3 text-sm text-gray-600 dark:text-gray-400 mb-8">
@@ -303,7 +303,7 @@ html_content = """<!DOCTYPE html>
                             <li class="flex items-center gap-2"><i class="fa-solid fa-check text-brandgreen"></i> Custom Integrations</li>
                         </ul>
                     </div>
-                    <a href="#contact" class="w-full py-3 text-center rounded-xl border border-gray-300 dark:border-gray-700 text-gray-800 dark:text-white font-semibold text-sm hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">Contact Us</a>
+                    <button onclick="openPaystackCheckout('enterprise', 20000000)" class="w-full py-3 rounded-xl bg-gray-900 dark:bg-white text-white dark:text-gray-900 font-semibold text-sm hover:opacity-90 transition-opacity">⚡ Pay & Start</button>
                 </div>
             </div>
         </div>
